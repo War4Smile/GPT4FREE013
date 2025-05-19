@@ -8,3 +8,4 @@ requests
 asyncio
 pollinations
 beautifulsoup4
+pillow

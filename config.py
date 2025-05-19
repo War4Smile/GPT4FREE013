@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "TG_TOKEN")
 API_DeepSeek = os.getenv("API_DeepSeek", "")
 
 # Провайдер для генерации изображений
-IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "Blackbox")
+IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "PollinationsAI")
 
 # Модель для генерации изображений
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "flux")

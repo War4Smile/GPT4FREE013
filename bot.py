@@ -12,6 +12,8 @@ import random
 import hashlib
 import httpx
 import json
+import urllib.parse
+from tenacity import retry, stop_after_attempt, wait_exponential
 import pollinations as ai
 from io import BytesIO
 from bs4 import BeautifulSoup
@@ -1035,7 +1037,7 @@ async def handle_image_description(message: Message):
     save_users()
 
     # Сохраняем запрос на изображение
-    image_requests[user_id].append(prompt)
+    image_requests[user_id] = [prompt]
 
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_PHOTO)
     
@@ -1043,24 +1045,26 @@ async def handle_image_description(message: Message):
         # Параметры для генерации изображения
         width = settings["width"]
         height = settings["height"]
-        seed = random.randint(10, 99999999)  # Случайное число для seed
-        model = settings["model"]  # Используем выбранную модель
+        seed = random.randint(10, 99999999)
+        model = settings["model"]
 
-        # Формируем URL для запроса
-        image_url = f"https://pollinations.ai/p/{prompt}?width={width}&height={height}&seed={seed}&model={model}&nologo=true"
-
+        # Формируем корректный URL с кодированием параметров
+        encoded_prompt = urllib.parse.quote(prompt)
+        params = {
+            "width": width,
+            "height": height,
+            "seed": seed,
+            "model": model,
+            "nologo": "true",
+            "enhance": "true"
+        }
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{urllib.parse.urlencode(params)}"
+        
         # Логируем параметры для отладки
-        logging.info(f"Генерация изображения для {user_id} с параметрами: model={model}, width={width}, height={height}, seed={seed}")
+        logging.info(f"Генерация изображения для {user_id} с параметрами: {image_url}")
 
-        # Загружаем изображение с тайм-аутом
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=30) as response:
-                if response.status == 200:
-                    image_data = await response.read()
-                else:
-                    logging.error(f"Ошибка загрузки изображения: {response.status} - {await response.text()}")
-                    await message.answer("⚠️ Ошибка: не удалось получить изображение.")
-                    return
+        # Загружаем изображение с увеличенным тайм-аутом и повторными попытками
+        image_data = await download_image_with_retry(image_url)
         
         # Создаем объект BufferedInputFile из данных изображения
         input_file = BufferedInputFile(image_data, filename='image.jpg')
@@ -1071,8 +1075,8 @@ async def handle_image_description(message: Message):
             caption=f"🖼 Результат для: '{prompt}'\nМодель: {model}, Размер: {width}x{height}, Seed: {seed}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🔄", callback_data=f"regenerate:{user_id}"),  # Кнопка перегенерации
-                    InlineKeyboardButton(text="✅", callback_data=f"accept:{user_id}")  # Кнопка принятия
+                    InlineKeyboardButton(text="🔄", callback_data=f"regenerate:{user_id}"),
+                    InlineKeyboardButton(text="✅", callback_data=f"accept:{user_id}")
                 ]
             ])
         )
@@ -1087,17 +1091,29 @@ async def handle_image_description(message: Message):
 
         # Сбрасываем состояние и историю после обработки
         user_states[user_id] = None
-        image_requests[user_id] = []  # Очищаем историю запросов на изображение
+        image_requests[user_id] = []
 
     except Exception as e:
         logging.error(f"Ошибка генерации изображения: {str(e)}")
-        user_states[user_id] = None  # Сбрасываем состояние при ошибке
+        user_states[user_id] = None
         await message.answer(f"⚠️ Произошла ошибка при генерации: {str(e)}")
+
+# Функция загрузки изображения с повторными попытками
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+async def download_image_with_retry(image_url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(image_url, timeout=300) as response:
+            if response.status == 200:
+                return await response.read()
+            error_text = await response.text()
+            logging.error(f"Pollinations API ошибка: {response.status} - {error_text}")
+            raise Exception(f"Ошибка генерации: {error_text}")
 
 # Обработчик для перегенерации изображения
 @dp.callback_query(lambda query: query.data.startswith("regenerate:"))
 async def handle_regenerate(callback: CallbackQuery):
-    user_id = int(callback.data.split(":")[1])  # Извлекаем user_id
+    user_id = int(callback.data.split(":")[1])
+    
     if user_id not in last_image_requests:
         await callback.answer("❌ Ошибка: нет данных для перегенерации", show_alert=True)
         return
@@ -1108,26 +1124,26 @@ async def handle_regenerate(callback: CallbackQuery):
     model = request_data["model"]
     width = request_data["width"]
     height = request_data["height"]
-
-    # Генерируем новое значение seed
     new_seed = random.randint(10, 99999999)
 
-    # Формируем новый URL для запроса
-    image_url = f"https://pollinations.ai/p/{prompt}?width={width}&height={height}&seed={new_seed}&model={model}&nologo=true"
-
-    # Логируем параметры для отладки
-    logging.info(f"Перегенерация изображения с параметрами: model={model}, width={width}, height={height}, seed={new_seed}")
+    # Формируем новый URL с обновленными параметрами
+    encoded_prompt = urllib.parse.quote(prompt)
+    params = {
+        "width": width,
+        "height": height,
+        "seed": new_seed,
+        "model": model,
+        "nologo": "true",
+        "enhance": "true"
+    }
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{urllib.parse.urlencode(params)}"
+    
+    # Логируем параметры
+    logging.info(f"Перегенерация изображения: {image_url}")
 
     try:
-        # Загружаем изображение с тайм-аутом
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url, timeout=30) as response:
-                if response.status == 200:
-                    image_data = await response.read()
-                else:
-                    logging.error(f"Ошибка загрузки изображения: {response.status} - {await response.text()}")
-                    await callback.answer("⚠️ Ошибка: не удалось получить изображение.", show_alert=True)
-                    return
+        # Загружаем изображение с повторными попытками
+        image_data = await download_image_with_retry(image_url)
         
         # Создаем объект BufferedInputFile из данных изображения
         input_file = BufferedInputFile(image_data, filename='image.jpg')
@@ -1141,8 +1157,8 @@ async def handle_regenerate(callback: CallbackQuery):
             caption=f"🖼 Перегенерированное изображение для: '{prompt}'\nМодель: {model}, Размер: {width}x{height}, Seed: {new_seed}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="🔄", callback_data=f"regenerate:{user_id}"),  # Кнопка перегенерации
-                    InlineKeyboardButton(text="✅", callback_data=f"accept:{user_id}")  # Кнопка принятия
+                    InlineKeyboardButton(text="🔄", callback_data=f"regenerate:{user_id}"),
+                    InlineKeyboardButton(text="✅", callback_data=f"accept:{user_id}")
                 ]
             ])
         )
@@ -1156,11 +1172,12 @@ async def handle_regenerate(callback: CallbackQuery):
 # Обработчик для кнопки "Готово"
 @dp.callback_query(lambda query: query.data.startswith("accept:"))
 async def handle_accept(callback: CallbackQuery):
-    user_id = int(callback.data.split(":")[1])  # Извлекаем user_id
+    user_id = int(callback.data.split(":")[1])
+    
     if user_id in last_image_requests:
-        del last_image_requests[user_id]  # Удаляем сохранённые данные о запросе
+        del last_image_requests[user_id]
         await callback.answer("✅ Запрос принят, кнопки убраны.")
-        await callback.message.edit_reply_markup(reply_markup=None)  # Убираем кнопки
+        await callback.message.edit_reply_markup(reply_markup=None)
     else:
         await callback.answer("❌ Ошибка: нет данных для принятия", show_alert=True)
 
