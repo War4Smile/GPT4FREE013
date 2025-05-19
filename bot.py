@@ -12,9 +12,11 @@ import random
 import hashlib
 import httpx
 import json
+import config
 import urllib.parse
 from tenacity import retry, stop_after_attempt, wait_exponential
 import pollinations as ai
+from PIL import Image
 from io import BytesIO
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -31,6 +33,7 @@ from httpx import HTTPStatusError
 from speechmatics.batch_client import BatchClient
 from speechmatics.models import BatchTranscriptionConfig
 from config import BOT_TOKEN, API_DeepSeek, IMAGE_PROVIDER, IMAGE_MODEL, SPEECHMATICS_API, TRANSCRIPTION_LANGUAGE, ADMINS
+
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
@@ -60,9 +63,10 @@ BLOCKED_USERS_FILE = 'blocked_users.json'
 blocked_users = {}
 
 # Списки команд для разных типов пользователей
-user_commands = [
+user_commands = [    
     BotCommand(command="start", description="🔑 Запуск бота"),
     BotCommand(command="image", description="🖼 Генерация изображения"),
+    BotCommand(command="analyze", description="🔍 Анализ изображения"),
     BotCommand(command="clear", description="🧹 Очистка истории"),
     BotCommand(command="help", description="📝 Список команд"),
     BotCommand(command="provider", description="🔄 Изменить модель GPT"),
@@ -1182,6 +1186,96 @@ async def handle_accept(callback: CallbackQuery):
         await callback.answer("❌ Ошибка: нет данных для принятия", show_alert=True)
 
 
+##################################################
+########### Блок анализа изображений ###########
+
+# Глобальные переменные
+image_analysis_requests = {}  # Хранение текущих запросов анализа
+user_analysis_states = {}     # Состояния пользователей
+
+# Обработчик команды /analyze
+@dp.message(Command("analyze"))
+async def cmd_analyze(message: Message):
+    user_id = message.from_user.id
+    await message.answer("🖼 Пожалуйста, отправьте изображение для анализа.")
+    user_analysis_states[user_id] = "waiting_for_image_analysis"
+
+# Обработчик изображений для анализа
+@dp.message(lambda message: message.photo or (message.document and message.document.mime_type.startswith('image/')))
+async def handle_image_analysis(message: Message):
+    user_id = message.from_user.id
+    
+    if user_analysis_states.get(user_id) != "waiting_for_image_analysis":
+        return  # Игнорируем изображения, если не запрашивали анализ
+    
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    
+    try:
+        # Получаем файл
+        photo = message.photo[-1] if message.photo else message.document
+        file_info = await bot.get_file(photo.file_id)
+        file_path = file_info.file_path
+        image_data = await bot.download_file(file_path)
+        
+        # Проверяем размер
+        if file_info.file_size > config.MAX_IMAGE_SIZE:
+            await message.answer("❌ Размер изображения превышает 512 MB")
+            return
+        
+        # Преобразуем изображение в base64
+        image_data.seek(0)
+        base64_image = base64.b64encode(image_data.read()).decode('utf-8')
+        
+        # Определяем формат изображения
+        image = Image.open(BytesIO(image_data.getvalue()))
+        image_format = image.format.lower() or "jpeg"
+        
+        # Формируем запрос к API
+        payload = {
+            "model": config.IMAGE_ANALYSIS_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Опишите, что изображено на этой картинке"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/{image_format};base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 500
+        }
+        
+        logging.info(f"Анализ изображения от {user_id}")
+        
+        # Отправляем запрос
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"Ошибка анализа: {response.status} - {error_text}")
+                    await message.answer("⚠️ Ошибка: не удалось проанализировать изображение")
+                    return
+                
+                result = await response.json()
+                analysis = result['choices'][0]['message']['content']
+                
+                # Отправляем результат
+                await message.answer(f"🔍 Результат анализа изображения:\n\n{analysis}")
+                
+    except Exception as e:
+        logging.error(f"Ошибка анализа изображения: {str(e)}")
+        await message.answer(f"⚠️ Ошибка при анализе изображения: {str(e)}")
+    
+    finally:
+        # Сбрасываем состояние
+        user_analysis_states[user_id] = None
+
+
 ###########################################################
 ########### Обработчик транскрибации аудиофайла ########### 
 
@@ -1416,15 +1510,27 @@ async def handle_message(message: Message):
         )
 
 # Обработчик для изображений и других медиафайлов
-@dp.message(lambda message: message.content_type in ['photo', 'document', 'video', 'sticker'])
+@dp.message(lambda message: message.content_type in ['photo', 'document'])
 async def handle_media(message: Message):
-    if message.content_type == 'photo':
+    if message.photo:
+        # Если это фото и не в состоянии анализа
+        if user_analysis_states.get(message.from_user.id) == "waiting_for_image_analysis":
+            return  # Пропускаем - будет обработано в handle_image_analysis
+        
         await message.answer("🖼 Для генерации изображений используйте команду /image")
-    else:
-        await message.answer("❌ Я пока не умею работать с этим типом файлов. Используйте текстовые сообщения для общения.")
+    elif message.document:
+        # Если это документ
+        if message.document.mime_type.startswith('image/'):
+            if user_analysis_states.get(message.from_user.id) == "waiting_for_image_analysis":
+                return  # Пропускаем - будет обработано в handle_image_analysis
+            else:
+                await message.answer("🖼 Для анализа изображений используйте команду /analyze")
+        else:
+            await message.answer("❌ Я пока не умею работать с этим типом файлов")
 
 ######################################################
 ########### Функция повторного подключения ###########
+
 async def wait_for_telegram_api():
     while True:
         if await check_telegram_api_availability():
