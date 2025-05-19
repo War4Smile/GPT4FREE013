@@ -1,0 +1,12 @@
+# .gitignore
+.env
+har_and_cookies/*
+venv/
+temp/
+OLD/
+/venv/*
+__pycache__
+*.pyc
+*.log
+user_data.json
+alworkproviders_partial.py

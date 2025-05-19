@@ -1,0 +1,10 @@
+aiogram==3.8.0
+g4f[All]
+aiohttp>=3.8.0
+python-dotenv
+langdetect
+speechmatics-python
+requests
+asyncio
+pollinations
+beautifulsoup4
