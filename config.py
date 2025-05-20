@@ -29,6 +29,23 @@ SPEECHMATICS_API = os.getenv("SPEECHMATICS_API", "SPEECHMATICS_APIKEY")
 TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "ru")
 
 # Настройки анализа изображений
+ANALYZE_SUGGESTION = "Вы хотите проанализировать изображение? Используйте команду /analyze"
 IMAGE_ANALYSIS_MODEL = "openai"
 MAX_IMAGE_SIZE = 512 * 1024 * 1024  # 512 MB
 SUPPORTED_IMAGE_FORMATS = ['image/jpeg', 'image/png', 'image/webp']
+ANALYSIS_QUALITY_SETTINGS = {
+    "high": 500,   # Высокая детализация
+    "medium": 300, # Средняя детализация
+    "low": 150     # Низкая детализация
+}
+
+# Настройки транскрибации через Pollinations AI
+TRANSCRIBE_MODEL = "openai-audio"
+SUPPORTED_AUDIO_FORMATS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm']
+MAX_AUDIO_SIZE = 200 * 1024 * 1024  # 200 MB
+
+# Настройки генерации аудио
+TTS_MODEL = "openai-audio"
+DEFAULT_VOICE = "alloy"  # Голос по умолчанию
+SUPPORTED_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+AUDIO_FORMAT = "mp3"  # Формат выходного аудио

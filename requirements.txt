@@ -1,11 +1,14 @@
+# requirements.txt
+# Необходимое окружение python 3.11 - (python3.11 -m venv venv)
 aiogram==3.8.0
-g4f[All]
 aiohttp>=3.8.0
-python-dotenv
-langdetect
-speechmatics-python
-requests
 asyncio
-pollinations
+base64
 beautifulsoup4
+g4f[All]
+langdetect
+pollinations
 pillow
+python-dotenv
+requests
+speechmatics-python

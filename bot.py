@@ -14,12 +14,7 @@ import httpx
 import json
 import config
 import urllib.parse
-from tenacity import retry, stop_after_attempt, wait_exponential
 import pollinations as ai
-from PIL import Image
-from io import BytesIO
-from bs4 import BeautifulSoup
-from datetime import datetime
 from aiogram import Bot, Dispatcher, types, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputFile, BufferedInputFile, FSInputFile, BotCommand, BotCommandScopeChat, TelegramObject
@@ -27,12 +22,27 @@ from aiogram.enums import ParseMode, ChatAction
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramBadRequest
 from alworkproviders import AVAILABLE_PROVIDERS
+from bs4 import BeautifulSoup
+from datetime import datetime
 from g4f.client import AsyncClient
-from langdetect import detect
 from httpx import HTTPStatusError
+from io import BytesIO
+from langdetect import detect
+from PIL import Image
+from pydub import AudioSegment
 from speechmatics.batch_client import BatchClient
 from speechmatics.models import BatchTranscriptionConfig
-from config import BOT_TOKEN, API_DeepSeek, IMAGE_PROVIDER, IMAGE_MODEL, SPEECHMATICS_API, TRANSCRIPTION_LANGUAGE, ADMINS
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from config import (
+    BOT_TOKEN,
+    API_DeepSeek,
+    IMAGE_PROVIDER,
+    IMAGE_MODEL,
+    SPEECHMATICS_API,
+    TRANSCRIPTION_LANGUAGE,
+    ADMINS
+    )
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -61,16 +71,27 @@ USER_DATA_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), 'user_d
 BLOCKED_USERS_FILE = 'blocked_users.json'
 # Словарь для хранения заблокированных пользователей
 blocked_users = {}
+# Словарь для хранения состояний анализа изображений
+user_analysis_states = {}  # Например: {user_id: "waiting_for_image_analysis"}
+# Словарь для хранения настроек анализа
+user_analysis_settings = {}  # Например: {user_id: {"quality": "high"}}
+# Словарь для хранения текущих запросов анализа
+image_analysis_requests = {}
+# Словарь для хранения состояний транскрибации
+user_transcribe_states = {}  # Например: {user_id: "waiting_for_audio_transcribe"}
 
 # Списки команд для разных типов пользователей
 user_commands = [    
     BotCommand(command="start", description="🔑 Запуск бота"),
     BotCommand(command="image", description="🖼 Генерация изображения"),
     BotCommand(command="analyze", description="🔍 Анализ изображения"),
+    BotCommand(command="generateaudio", description="🎙️ Сгенерировать аудио из текста"),
+    BotCommand(command="transcribe", description="🎤 Распознать речь из аудиофайла"),
     BotCommand(command="clear", description="🧹 Очистка истории"),
     BotCommand(command="help", description="📝 Список команд"),
     BotCommand(command="provider", description="🔄 Изменить модель GPT"),
-    BotCommand(command="imagesettings", description="⚙️ Настройки изображения")
+    BotCommand(command="imagesettings", description="⚙️ Настройки изображения"),
+    BotCommand(command="analysissettings", description="🔎 Настройки анализа")
 ]
 admin_commands = user_commands + [
     BotCommand(command="adminusers", description="👥 Администрирование пользователей")
@@ -202,7 +223,6 @@ def load_blocked_users():
 
 
 # Функция сохранения заблокированных пользователей
-
 def save_blocked_users():
     with open(BLOCKED_USERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(blocked_users, f, ensure_ascii=False, indent=4)
@@ -213,8 +233,6 @@ REGENERATE_CALLBACK_PREFIX = "regenerate:"
 regenerate_cb = REGENERATE_CALLBACK_PREFIX 
 
 # Функция для очистки HTML-тегов
-import re
-
 def remove_html_tags(text):
     if not text:
         return ""
@@ -272,6 +290,48 @@ def clear_temp_folder():
 
 # Вызов функции очистки при запуске
 clear_temp_folder()
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+async def transcribe_with_retry(payload):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://text.pollinations.ai/openai ", 
+            json=payload, 
+            timeout=300
+        ) as response:
+            if response.status == 200:
+                return await response.json()
+            error_text = await response.text()
+            logging.error(f"Pollinations API ошибка: {response.status} - {error_text}")
+            raise Exception(f"Ошибка API: {error_text}")
+
+def convert_to_mp3(input_path, output_path):
+    """Конвертация аудио в MP3 для уменьшения размера"""
+    try:
+        audio = AudioSegment.from_file(input_path)
+        # Уменьшаем битрейт и количество каналов
+        audio.export(output_path, format="mp3", bitrate="64k", parameters=["-ac", "1"])
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка конвертации в MP3: {str(e)}")
+        return False
+
+def split_audio(file_path, chunk_length_ms=300000):  # 5 минут
+    """Разделение аудиофайла на части"""
+    try:
+        audio = AudioSegment.from_file(file_path)
+        chunks = []
+        
+        for i in range(0, len(audio), chunk_length_ms):
+            chunk = audio[i:i+chunk_length_ms]
+            chunk_path = os.path.join(tempfile.gettempdir(), f"chunk_{i//1000}.mp3")
+            chunk.export(chunk_path, format="mp3", bitrate="64k", parameters=["-ac", "1"])
+            chunks.append(chunk_path)
+        
+        return chunks
+    except Exception as e:
+        logging.error(f"Ошибка разбиения аудио: {str(e)}")
+        return []
 
 #####################################################
 ########### Проверка доступности Telegram ###########
@@ -429,10 +489,22 @@ async def handle_admin_stats(query: CallbackQuery):
         total_users = len(user_info)
         total_messages = sum(len(h) for h in user_history.values())
         total_blocked = len(blocked_users)
-        
+        total_transcriptions = sum(
+            1 for entries in user_history.values() 
+            for entry in entries 
+            if entry.get("type") == "transcribe"
+        )
+        total_audio = sum(
+            1 for entries in user_history.values() 
+            for entry in entries 
+            if entry.get("type") == "audio"
+        )
+
         stats_text += f"👥 Всего пользователей: {total_users}\n"
         stats_text += f"📨 Всего сообщений: {total_messages}\n"
         stats_text += f"🚫 Заблокированных: {total_blocked}\n\n"
+        stats_text += f"\n🎤 Всего транскрибаций: {total_transcriptions}"
+        stats_text += f"\n🎙️ Всего аудио: {total_audio}"
         stats_text += "Топ активных пользователей:\n"
         
         # Сортируем пользователей по количеству сообщений
@@ -689,46 +761,60 @@ async def handle_admin_history(query: CallbackQuery):
         return
     
     user_id = int(query.data.split("_")[2])
+    history = user_history.get(user_id, [])
     
-    if user_id not in user_history:
-        await query.answer("❌ История пользователя пуста", show_alert=True)
-        return
-    
-    user_info_data = user_info.get(user_id, {})
-    username = f"(@{user_info_data.get('username', 'нет')})" if user_info_data.get('username') else ""
-    name = f"{user_info_data.get('first_name', '')} {user_info_data.get('last_name', '')}".strip()
-    
-    history_text = f"📜 История пользователя {name} {username}\n\n"
+    # Максимальная длина сообщения Telegram (4096 символов)
+    MAX_MESSAGE_LENGTH = 4000  
+    history_text = "📜 История диалога:\n\n"
     valid_entries = 0
     
-    for entry in user_history.get(user_id, []):
-        # Пропускаем записи без временной метки
-        if not entry.get('timestamp'):
-            continue
+    # Разбиваем историю на части
+    for entry in history:
+        entry_type = entry.get("type", "unknown")
+        
+        if entry_type == "text":
+            role = entry.get("role", "user")
+            content = entry.get("content", "")
+            timestamp = entry.get("timestamp", "")
+            prefix = "👤" if role == "user" else "🤖"
             
-        entry_type = entry.get('type', 'text')
-        timestamp = format_timestamp(entry.get('timestamp', ''))
-        
-        if entry_type == 'text':
-            role_icon = get_role_icon(entry.get('role', 'user'))
-            content = entry.get('content', '')
-            history_text += f"{role_icon} [{timestamp}]:\n{content}\n\n"
+            # Формируем запись
+            entry_text = f"{prefix} {role.capitalize()} ({timestamp}):\n{content}\n\n"
+            
+            # Проверяем длину
+            if len(history_text) + len(entry_text) > MAX_MESSAGE_LENGTH:
+                await query.message.answer(history_text)
+                history_text = ""  # Начинаем новую часть
+            
+            history_text += entry_text
             valid_entries += 1
         
-        elif entry_type == 'image':
-            prompt = entry.get('prompt', '')
-            model = entry.get('model', '?')
-            size = f"{entry.get('width', '?')}x{entry.get('height', '?')}"
-            history_text += (
-                f"🖼 [{timestamp}]:\n"
-                f"Запрос изображения: \"{prompt}\"\n"
-                f"Модель: {model}, Размер: {size}\n\n"
-            )
+        elif entry_type == "image":
+            prompt = entry.get("prompt", "")
+            model = entry.get("model", "")
+            width = entry.get("width", "")
+            height = entry.get("height", "")
+            history_text += f"🖼 Запрос изображения: '{prompt}'\nМодель: {model}, Размер: {width}x{height}\n\n"
             valid_entries += 1
+        
+        elif entry_type == "transcribe":
+            response = entry.get("response", "")
+            history_text += f"🎤 Транскрибация: {response[:50]}...\n\n"
+            valid_entries += 1
+
+    # Отправляем оставшуюся часть
+    if history_text.strip():
+        await query.message.answer(history_text)
     
-    history_text += f"\n📊 Всего записей: {valid_entries}"
+    # Кнопка возврата
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="↩️ Назад", callback_data=f"admin_user_{user_id}")]
+    ])
     
-    await query.message.answer(history_text)
+    if valid_entries == 0:
+        await query.message.answer("История пуста")
+    
+    await query.message.answer("Конец истории", reply_markup=keyboard)
     await query.answer()
 
 # Обработчик для блокировки пользователя
@@ -1189,9 +1275,11 @@ async def handle_accept(callback: CallbackQuery):
 ##################################################
 ########### Блок анализа изображений ###########
 
-# Глобальные переменные
-image_analysis_requests = {}  # Хранение текущих запросов анализа
-user_analysis_states = {}     # Состояния пользователей
+# Функция для получения настроек анализа
+def get_user_analysis_settings(user_id):
+    if user_id not in user_analysis_settings:
+        user_analysis_settings[user_id] = {"quality": "high"}
+    return user_analysis_settings[user_id]
 
 # Обработчик команды /analyze
 @dp.message(Command("analyze"))
@@ -1200,13 +1288,48 @@ async def cmd_analyze(message: Message):
     await message.answer("🖼 Пожалуйста, отправьте изображение для анализа.")
     user_analysis_states[user_id] = "waiting_for_image_analysis"
 
+# Обработчик команды /analysissettings
+@dp.message(Command("analysissettings"))
+async def cmd_analysis_settings(message: Message):
+    user_id = message.from_user.id
+    settings = get_user_analysis_settings(user_id)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"Качество: {settings['quality']}", callback_data="analysis_quality")],
+        [InlineKeyboardButton(text="Высокое качество", callback_data="quality_high")],
+        [InlineKeyboardButton(text="Среднее качество", callback_data="quality_medium")],
+        [InlineKeyboardButton(text="Низкое качество", callback_data="quality_low")],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="analysis_settings_back")]
+    ])
+    await message.answer("🔍 Настройки анализа изображений:", reply_markup=keyboard)
+
+# Обработчик выбора качества анализа
+@dp.callback_query(lambda query: query.data.startswith("quality_"))
+async def handle_analysis_quality(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    quality = callback.data.split("_")[1]
+    
+    if user_id not in user_analysis_settings:
+        user_analysis_settings[user_id] = {}
+    user_analysis_settings[user_id]["quality"] = quality
+    
+    await callback.message.edit_text(f"✅ Качество анализа установлено: {quality}")
+    await callback.answer()
+
+# Обработчик возврата к основному меню
+@dp.callback_query(lambda query: query.data == "analysis_settings_back")
+async def handle_analysis_settings_back(callback: CallbackQuery):
+    await callback.message.edit_text("⚙️ Выберите настройку:")
+    # ... (ваше текущее меню настроек)
+
 # Обработчик изображений для анализа
 @dp.message(lambda message: message.photo or (message.document and message.document.mime_type.startswith('image/')))
 async def handle_image_analysis(message: Message):
     user_id = message.from_user.id
     
+    # Проверяем, ожидаем ли мы изображение для анализа
     if user_analysis_states.get(user_id) != "waiting_for_image_analysis":
-        return  # Игнорируем изображения, если не запрашивали анализ
+        return  # Игнорируем, если не запрашивали анализ
     
     await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
     
@@ -1217,18 +1340,21 @@ async def handle_image_analysis(message: Message):
         file_path = file_info.file_path
         image_data = await bot.download_file(file_path)
         
-        # Проверяем размер
+        # Проверка размера
         if file_info.file_size > config.MAX_IMAGE_SIZE:
             await message.answer("❌ Размер изображения превышает 512 MB")
             return
         
         # Преобразуем изображение в base64
+        image = Image.open(BytesIO(image_data.getvalue()))
+        image_format = image.format.lower() or "jpeg"
         image_data.seek(0)
         base64_image = base64.b64encode(image_data.read()).decode('utf-8')
         
-        # Определяем формат изображения
-        image = Image.open(BytesIO(image_data.getvalue()))
-        image_format = image.format.lower() or "jpeg"
+        # Получаем настройки пользователя
+        analysis_settings = get_user_analysis_settings(user_id)
+        quality = analysis_settings["quality"]
+        max_tokens = config.ANALYSIS_QUALITY_SETTINGS[quality]
         
         # Формируем запрос к API
         payload = {
@@ -1247,7 +1373,7 @@ async def handle_image_analysis(message: Message):
                     ]
                 }
             ],
-            "max_tokens": 500
+            "max_tokens": max_tokens
         }
         
         logging.info(f"Анализ изображения от {user_id}")
@@ -1264,6 +1390,23 @@ async def handle_image_analysis(message: Message):
                 result = await response.json()
                 analysis = result['choices'][0]['message']['content']
                 
+                # Сохраняем в историю
+                user_entry = {
+                    "type": "analysis",
+                    "prompt": "Опишите, что изображено на этой картинке",
+                    "timestamp": datetime.now().isoformat()
+                }
+                user_history.setdefault(user_id, []).append(user_entry)
+                
+                assistant_entry = {
+                    "type": "analysis",
+                    "response": analysis,
+                    "quality": quality,
+                    "timestamp": datetime.now().isoformat()
+                }
+                user_history[user_id].append(assistant_entry)
+                save_users()
+                
                 # Отправляем результат
                 await message.answer(f"🔍 Результат анализа изображения:\n\n{analysis}")
                 
@@ -1275,10 +1418,402 @@ async def handle_image_analysis(message: Message):
         # Сбрасываем состояние
         user_analysis_states[user_id] = None
 
+# Обработчик для изображений без команды
+@dp.message(lambda message: message.photo or (message.document and message.document.mime_type.startswith('image/')))
+async def handle_unsolicited_image(message: Message):
+    user_id = message.from_user.id
+    
+    # Проверяем, не находится ли пользователь в процессе генерации изображения
+    if user_states.get(user_id) == "waiting_for_image_description":
+        return  # Игнорируем, если пользователь уже в процессе генерации
+    
+    # Проверяем, не запрашиваем ли мы анализ изображения
+    if user_analysis_states.get(user_id) == "waiting_for_image_analysis":
+        return  # Игнорируем, если пользователь уже в процессе анализа
+
+    # Отправляем предложение проанализировать изображение
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Проанализировать", callback_data="suggest_analyze")],
+        [InlineKeyboardButton(text="🖼 Сгенерировать", callback_data="suggest_generate")]
+    ])
+    
+    await message.answer(
+        "Вы отправили изображение. Хотите проанализировать его содержимое или сгенерировать новое?",
+        reply_markup=keyboard
+    )
+
+# Обработчик нажатия на кнопку "Проанализировать"
+@dp.callback_query(lambda query: query.data == "suggest_analyze")
+async def handle_suggest_analyze(callback: CallbackQuery):
+    await callback.message.edit_text("Хорошо, я могу проанализировать это изображение. Для этого используйте команду `/analyze`.")
+    await callback.answer()
+
+# Обработчик нажатия на кнопку "Сгенерировать"
+@dp.callback_query(lambda query: query.data == "suggest_generate")
+async def handle_suggest_generate(callback: CallbackQuery):
+    await callback.message.edit_text("Хорошо, вы можете сгенерировать новое изображение. Для этого используйте команду `/image`.")
+    await callback.answer()
+
+
+###########################################################
+####### Обработчик генерации аудиофайла Polinations #######
+# Блок генерации аудио из текста
+@dp.message(Command("generateaudio"))
+async def cmd_generate_audio(message: Message):
+    user_id = message.from_user.id
+    reply = message.reply_to_message
+    
+    if not reply or not reply.text:
+        await message.answer("❌ Ответьте на текстовое сообщение командой `/generateaudio`")
+        return
+    
+    await message.answer("🎙️ Выберите голос для генерации аудио:", reply_markup=voice_selection_keyboard())
+    user_states[user_id] = {
+        "action": "generating_audio",
+        "text": reply.text,
+        "message_id": reply.message_id
+    }
+
+def voice_selection_keyboard():
+    """Клавиатура для выбора голоса"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=voice, callback_data=f"voice_{voice}") for voice in config.SUPPORTED_VOICES],
+        [InlineKeyboardButton(text="↩️ Отмена", callback_data="voice_cancel")]
+    ])
+
+@dp.callback_query(lambda query: query.data.startswith("voice_"))
+async def handle_voice_selection(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_states.get(user_id)
+    
+    if not state or state.get("action") != "generating_audio":
+        await callback.answer("❌ Нет активного запроса генерации аудио")
+        return
+    
+    voice = callback.data.split("_")[1]
+    
+    if voice == "cancel":
+        await callback.message.delete()
+        user_states.pop(user_id, None)
+        return
+    
+    text = state.get("text", "")
+    
+    # Проверяем длину текста
+    if len(text) > 4096:
+        # Используем POST-метод для длинных текстов
+        await generate_audio_post(user_id, text, voice, callback)
+    else:
+        # Используем GET-метод для коротких текстов
+        await generate_audio_get(user_id, text, voice, callback)
+
+async def generate_audio_get(user_id, text, voice, callback):
+    try:
+        encoded_text = urllib.parse.quote(text)
+        payload = {
+            "url": f"https://text.pollinations.ai/ {encoded_text}?model={config.TTS_MODEL}&voice={voice}"
+        }
+        
+        audio_data = await generate_audio_with_retry(payload, method="GET")
+        
+        # Сохраняем в историю
+        save_audio_history(user_id, text, voice, "GET")
+        
+        # Создаем и отправляем аудиофайл
+        input_file = BufferedInputFile(audio_data, filename='generated_audio.mp3')
+        await callback.message.answer_audio(input_file, caption=f"🎙️ Аудио сгенерировано с голосом: {voice}")
+        await callback.message.delete()
+    
+    except Exception as e:
+        logging.error(f"Ошибка генерации через GET: {str(e)}")
+        await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
+
+async def generate_audio_post(user_id, text, voice, callback):
+    try:
+        payload = {
+            "model": config.TTS_MODEL,
+            "messages": [{"role": "user", "content": text}],
+            "voice": voice
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"Ошибка генерации аудио: {response.status} - {error_text}")
+                    await callback.message.answer("⚠️ Не удалось сгенерировать аудио")
+                    return
+                
+                result = await response.json()
+        
+        # Извлекаем base64-аудио
+        try:
+            audio_data_base64 = result['choices'][0]['message']['audio']['data']
+            audio_binary = base64.b64decode(audio_data_base64)
+        except (KeyError, IndexError, base64.binascii.Error) as e:
+            logging.error(f"Ошибка обработки ответа: {str(e)}")
+            await callback.message.answer("❌ Ошибка: не удалось получить аудио из ответа")
+            return
+        
+        # Сохраняем в историю
+        save_audio_history(user_id, text, voice, "POST")
+        
+        # Создаем и отправляем аудиофайл
+        input_file = BufferedInputFile(audio_binary, filename='generated_audio.mp3')
+        await callback.message.answer_audio(input_file, caption=f"🎙️ Аудио сгенерировано с голосом: {voice}")
+        await callback.message.delete()
+    
+    except Exception as e:
+        logging.error(f"Ошибка генерации через POST: {str(e)}")
+        await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
+
+def save_audio_history(user_id, text, voice, method):
+    """Сохранение генерации аудио в историю"""
+    entry = {
+        "type": "audio",
+        "prompt": text[:100],  # Обрезаем длинные тексты
+        "voice": voice,
+        "method": method,
+        "timestamp": datetime.now().isoformat()
+    }
+    user_history.setdefault(user_id, []).append(entry)
+    save_users()
+
+def split_text_into_chunks(text, max_length=4096):
+    """Разделение текста на части для генерации аудио"""
+    words = text.split()
+    chunks = []
+    current_chunk = ""
+    
+    for word in words:
+        if len(current_chunk) + len(word) + 1 <= max_length:
+            current_chunk += " " + word
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = word
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+async def generate_audio_with_retry(payload, method="POST"):
+    """Генерация аудио с повторными попытками"""
+    async with aiohttp.ClientSession() as session:
+        if method == "GET":
+            async with session.get(payload["url"], timeout=300) as response:
+                if response.status == 200:
+                    return await response.read()
+                error_text = await response.text()
+                raise Exception(f"Ошибка API: {error_text}")
+        else:
+            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+                if response.status == 200:
+                    return await response.json()
+                error_text = await response.text()
+                raise Exception(f"Ошибка API: {error_text}")
+
+
+###########################################################
+##### Обработчик транскрибации аудиофайла Polinations ##### 
+
+# Обработчик команды /transcribe
+@dp.message(Command("transcribe"))
+async def cmd_transcribe(message: Message):
+    user_id = message.from_user.id
+    await message.answer("🎤 Пожалуйста, отправьте аудиофайл для распознавания.")
+    user_transcribe_states[user_id] = "waiting_for_audio_transcribe"
+
+# Обработчик аудиофайлов для транскрибации
+@dp.message(lambda message: message.audio or message.voice or message.document and message.document.mime_type.startswith('audio/'))
+async def handle_audio_transcribe(message: Message):
+    user_id = message.from_user.id
+    
+    # Проверяем, ожидаем ли мы аудиофайл для транскрибации
+    if user_transcribe_states.get(user_id) != "waiting_for_audio_transcribe":
+        return  # Игнорируем, если не запрашивали транскрибацию
+    
+    await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    
+    try:
+        # Получаем файл
+        audio_file = message.audio or message.voice or message.document
+        file_info = await bot.get_file(audio_file.file_id)
+        file_path = file_info.file_path
+        
+        # Создаём временную директорию
+        temp_dir = tempfile.gettempdir()
+        temp_input_path = os.path.join(temp_dir, f"{file_info.file_id}.{file_path.split('.')[-1]}")
+        
+        # Скачиваем файл
+        await bot.download_file(file_path, temp_input_path)
+        
+        # Проверка формата
+        file_extension = temp_input_path.split('.')[-1].lower()
+        if file_extension not in config.SUPPORTED_AUDIO_FORMATS:
+            await message.answer(f"❌ Формат {file_extension} не поддерживается. Поддерживаются: {', '.join(config.SUPPORTED_AUDIO_FORMATS)}")
+            return
+        
+        # Проверка размера
+        file_size = os.path.getsize(temp_input_path)
+        if file_size > config.MAX_AUDIO_SIZE:
+            await message.answer("⏳ Файл слишком большой. Попробую сжать...")
+            
+            # Конвертируем в MP3
+            mp3_path = os.path.join(temp_dir, f"{file_info.file_id}.mp3")
+            
+            if not convert_to_mp3(temp_input_path, mp3_path):
+                await message.answer("❌ Не удалось конвертировать файл в MP3")
+                return
+            
+            # Проверяем размер после конвертации
+            mp3_size = os.path.getsize(mp3_path)
+            if mp3_size > config.MAX_AUDIO_SIZE:
+                await message.answer("⏳ Файл всё ещё слишком большой. Разбиваю на части...")
+                
+                # Разбиваем на части
+                chunks = split_audio(mp3_path)
+                if not chunks:
+                    await message.answer("❌ Не удалось разбить аудиофайл на части")
+                    return
+                
+                full_transcription = ""
+                progress_msg = await message.answer("🔄 Обработка частей файла:")
+                
+                for i, chunk_path in enumerate(chunks):
+                    # Обновляем статус прогресса
+                    await progress_msg.edit_text(f"🔄 Обработка части {i+1}/{len(chunks)}")
+                    
+                    # Кодируем часть в base64
+                    with open(chunk_path, "rb") as f:
+                        encoded_audio = base64.b64encode(f.read()).decode('utf-8')
+                    
+                    # Формируем запрос к API
+                    payload = {
+                        "model": config.TRANSCRIBE_MODEL,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Пожалуйста, распознайте речь из этой части файла:"},
+                                    {
+                                        "type": "input_audio",
+                                        "input_audio": {
+                                            "data": encoded_audio,
+                                            "format": "mp3"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                    
+                    try:
+                        result = await transcribe_with_retry(payload)
+                        transcription = result['choices'][0]['message']['content']
+                        full_transcription += f"Часть {i+1}:\n{transcription}\n\n"
+                    except Exception as e:
+                        logging.error(f"Ошибка при транскрибации части {i+1}: {str(e)}")
+                        full_transcription += f"Часть {i+1}: ОШИБКА - {str(e)}\n\n"
+                
+                # Удаляем сообщение прогресса
+                await progress_msg.delete()
+                
+                # Сохраняем в историю
+                user_entry = {
+                    "type": "transcribe",
+                    "prompt": "Распознайте речь из этого аудиофайла (разбит на части)",
+                    "timestamp": datetime.now().isoformat()
+                }
+                user_history.setdefault(user_id, []).append(user_entry)
+                
+                assistant_entry = {
+                    "type": "transcribe",
+                    "response": full_transcription,
+                    "timestamp": datetime.now().isoformat()
+                }
+                user_history[user_id].append(assistant_entry)
+                save_users()
+                
+                # Отправляем результат
+                await message.answer(f"🎤 Результат транскрибации (файл разбит на части):\n\n{full_transcription}")
+                return
+        
+        else:
+            # Файл нормального размера - используем напрямую
+            with open(temp_input_path, "rb") as f:
+                encoded_audio = base64.b64encode(f.read()).decode('utf-8')
+        
+        # Формируем запрос к API
+        payload = {
+            "model": config.TRANSCRIBE_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Пожалуйста, распознайте речь из этого аудиофайла:"},
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": encoded_audio,
+                                "format": file_extension
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        logging.info(f"Транскрибация аудио от {user_id}")
+        
+        # Отправляем запрос
+        result = await transcribe_with_retry(payload)
+        transcription = result['choices'][0]['message']['content']
+        
+        # Сохраняем в историю
+        user_entry = {
+            "type": "transcribe",
+            "prompt": "Распознайте речь из этого аудиофайла",
+            "timestamp": datetime.now().isoformat()
+        }
+        user_history.setdefault(user_id, []).append(user_entry)
+        
+        assistant_entry = {
+            "type": "transcribe",
+            "response": transcription,
+            "timestamp": datetime.now().isoformat()
+        }
+        user_history[user_id].append(assistant_entry)
+        save_users()
+        
+        # Отправляем результат
+        await message.answer(f"🎤 Результат транскрибации:\n\n{transcription}")
+        
+    except Exception as e:
+        logging.error(f"Ошибка транскрибации: {str(e)}")
+        await message.answer(
+            "⚠️ Ошибка при транскрибации:\n"
+            "1. Проверьте, что файл не превышает 512 MB\n"
+            "2. Попробуйте использовать формат MP3\n"
+            "3. Для длинных записей используйте более короткие фрагменты"
+        )
+    
+    finally:
+        # Очищаем временные файлы
+        for root, _, files in os.walk(temp_dir):
+            for file in files:
+                if file.startswith(f"{file_info.file_id}."):
+                    try:
+                        os.remove(os.path.join(root, file))
+                    except:
+                        pass
+        
+        # Сбрасываем состояние
+        user_transcribe_states[user_id] = None
 
 ###########################################################
 ########### Обработчик транскрибации аудиофайла ########### 
-
 
 # Функция для получения существующих задач
 async def get_existing_jobs(api_key):
@@ -1508,6 +2043,32 @@ async def handle_message(message: Message):
             f"Провайдер автоматически сброшен на {current_provider}\n"
             "Попробуйте повторить запрос"
         )
+
+# Обработчик аудиофайлов без команды
+@dp.message(lambda message: message.audio or message.voice or message.document and message.document.mime_type.startswith('audio/'))
+async def handle_unsolicited_audio(message: Message):
+    user_id = message.from_user.id
+    
+    # Проверяем, не находится ли пользователь в процессе транскрибации
+    if user_transcribe_states.get(user_id) == "waiting_for_audio_transcribe":
+        return  # Игнорируем, если пользователь уже в процессе
+    
+    # Отправляем предложение проанализировать аудиофайл
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎤 Распознать речь", callback_data="suggest_transcribe")],
+        [InlineKeyboardButton(text="🖼 Сгенерировать изображение", callback_data="suggest_generate")]
+    ])
+    
+    await message.answer(
+        "Вы отправили аудиофайл. Хотите распознать речь или сгенерировать изображение?",
+        reply_markup=keyboard
+    )
+
+# Обработчик нажатия на кнопку "Распознать"
+@dp.callback_query(lambda query: query.data == "suggest_transcribe")
+async def handle_suggest_transcribe(callback: CallbackQuery):
+    await callback.message.edit_text("Хорошо, я могу распознать речь в этом аудиофайле. Для этого используйте команду `/transcribe`.")
+    await callback.answer()
 
 # Обработчик для изображений и других медиафайлов
 @dp.message(lambda message: message.content_type in ['photo', 'document'])
