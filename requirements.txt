@@ -3,7 +3,6 @@
 aiogram==3.8.0
 aiohttp>=3.8.0
 asyncio
-base64
 beautifulsoup4
 g4f[All]
 langdetect

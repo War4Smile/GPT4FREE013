@@ -14,11 +14,23 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "TG_TOKEN")
 # API ключ для DeepSeek
 API_DeepSeek = os.getenv("API_DeepSeek", "")
 
+
+# Дополнительные параметры генерации изображений
+IMAGE_PARAMS = {
+    "private": False,
+    "enhance": True,
+    "safe": True,
+    "referrer": "MyTestBot",  # Идентификатор вашего бота
+    "nologo": True
+}
 # Провайдер для генерации изображений
 IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "PollinationsAI")
-
+DEFAULT_TRANSLATION_PROVIDER = "FreeGpt"
+DEFAULT_TRANSLATION_MODEL = "gpt-3.5-turbo"
 # Модель для генерации изображений
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "flux")
+DEFAULT_IMAGE_MODELS = ["flux", "flux-anime", "flux-cablyai"]
+GPTIMAGE_API_TOKEN = "ВАШ_ТОКЕН"
 
 # FusionBrain API
 FUSIONBRAIN_APIKEY = os.getenv("FUSIONBRAIN_APIKEY", "FUSIONBRAIN_APIKEY")
@@ -38,6 +50,11 @@ ANALYSIS_QUALITY_SETTINGS = {
     "medium": 300, # Средняя детализация
     "low": 150     # Низкая детализация
 }
+
+# Настройки генерации аудио
+TTS_MODEL = "openai-audio"
+SUPPORTED_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+AUDIO_FORMAT = "mp3"  # Поддерживаемый формат
 
 # Настройки транскрибации через Pollinations AI
 TRANSCRIBE_MODEL = "openai-audio"

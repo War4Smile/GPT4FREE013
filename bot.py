@@ -41,7 +41,9 @@ from config import (
     IMAGE_MODEL,
     SPEECHMATICS_API,
     TRANSCRIPTION_LANGUAGE,
-    ADMINS
+    ADMINS,
+    DEFAULT_TRANSLATION_MODEL,
+    DEFAULT_TRANSLATION_PROVIDER
     )
 
 # Настройка логирования
@@ -86,14 +88,17 @@ user_commands = [
     BotCommand(command="image", description="🖼 Генерация изображения"),
     BotCommand(command="analyze", description="🔍 Анализ изображения"),
     BotCommand(command="generateaudio", description="🎙️ Сгенерировать аудио из текста"),
-    BotCommand(command="transcribe", description="🎤 Распознать речь из аудиофайла"),
+    BotCommand(command="translatetoeng", description="🔍 Перевести текст на Английский"),
+    BotCommand(command="translatetoru", description="🔍 Перевести текст на Русский"),
     BotCommand(command="clear", description="🧹 Очистка истории"),
     BotCommand(command="help", description="📝 Список команд"),
     BotCommand(command="provider", description="🔄 Изменить модель GPT"),
-    BotCommand(command="imagesettings", description="⚙️ Настройки изображения"),
-    BotCommand(command="analysissettings", description="🔎 Настройки анализа")
+    BotCommand(command="imagesettings", description="⚙️ Настройки изображения")
 ]
 admin_commands = user_commands + [
+    BotCommand(command="tts", description="🎙️ Сгенерировать аудио из текста"),
+    BotCommand(command="transcribe", description="🎤 Распознать речь из аудиофайла"),
+    BotCommand(command="analysissettings", description="🔎 Настройки анализа"),
     BotCommand(command="adminusers", description="👥 Администрирование пользователей")
 ]
 
@@ -292,10 +297,28 @@ def clear_temp_folder():
 clear_temp_folder()
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+async def get_available_models():
+    """Загружает список доступных моделей изображений с Pollinations AI"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://image.pollinations.ai/models", timeout=30) as response:
+                if response.status == 200:
+                    models = await response.json()
+                    logging.info(f"✅ Получено {len(models)} моделей изображений")
+                    return models
+                else:
+                    error_text = await response.text()
+                    logging.error(f"❌ Ошибка загрузки моделей: {response.status} - {error_text}")
+                    return ["flux", "flux-anime", "flux-cablyai"]  # Резервные модели
+    except Exception as e:
+        logging.error(f"⚠️ Не удалось загрузить модели: {str(e)}")
+        return ["flux", "flux-anime", "flux-cablyai"]
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
 async def transcribe_with_retry(payload):
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            "https://text.pollinations.ai/openai ", 
+            "https://text.pollinations.ai/openai", 
             json=payload, 
             timeout=300
         ) as response:
@@ -332,6 +355,58 @@ def split_audio(file_path, chunk_length_ms=300000):  # 5 минут
     except Exception as e:
         logging.error(f"Ошибка разбиения аудио: {str(e)}")
         return []
+
+# Функция перевода на английский
+async def translate_to_english(text):
+    """Перевод текста на английский с помощью доступной ИИ-модели"""
+    if not text:
+        return text
+    
+    # Определяем язык
+    from langdetect import detect
+    detected_lang = detect(text)
+    if detected_lang != "ru":
+        return text  # Не переводим, если не русский
+    
+    try:
+        # Используем рабочую модель
+        async with aiohttp.ClientSession() as session:
+            response = await g4f.ChatCompletion.create_async(
+                model=DEFAULT_TRANSLATION_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a professional translator. You main task translate the following text to English, give only translate:"},
+                    {"role": "user", "content": text}
+                ],
+                provider=getattr(g4f.Provider,DEFAULT_TRANSLATION_PROVIDER),
+                api_key=None
+            )
+        return response.strip()
+    except Exception as e:
+        logging.warning(f"Не удалось перевести текст: {str(e)}")
+        return text  # Возвращаем оригинальный текст при ошибке
+
+# Функция перевода на Русский
+async def translate_to_russian(text):
+    """Перевод текста на русский с помощью доступной ИИ-модели"""
+    if not text:
+        return text
+    
+    try:
+        # Используем рабочую модель
+        async with aiohttp.ClientSession() as session:
+            response = await g4f.ChatCompletion.create_async(
+                model=DEFAULT_TRANSLATION_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a professional translator. You main task translate the following text to Russian, give only translate:"},
+                    {"role": "user", "content": text}
+                ],
+                provider=getattr(g4f.Provider,DEFAULT_TRANSLATION_PROVIDER),
+                api_key=None
+            )
+        return response.strip()
+    except Exception as e:
+        logging.warning(f"Не удалось перевести текст: {str(e)}")
+        return text  # Возвращаем оригинальный текст при ошибке
 
 #####################################################
 ########### Проверка доступности Telegram ###########
@@ -1005,20 +1080,27 @@ async def cmd_clear(message: Message):
 async def cmd_imagesettings(message: Message):
     user_id = message.from_user.id
     settings = get_user_settings(user_id)
-
-    # Создаем инлайн-клавиатуру
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"Модель: {settings['model']}", callback_data="setting_model")],
-        [
-            InlineKeyboardButton(text="Квадрат (1:1)", callback_data="setting_size_square"),
-            InlineKeyboardButton(text="Портрет (1:2)", callback_data="setting_size_portrait"),
-        ],
-        [
-            InlineKeyboardButton(text="Пейзаж (2:1)", callback_data="setting_size_landscape"),
-            InlineKeyboardButton(text="Сбросить настройки", callback_data="setting_reset"),
-        ]
+    
+    # Загружаем список моделей
+    available_models = await get_available_models()
+    
+    # Формируем клавиатуру с доступными моделями
+    keyboard_buttons = []
+    for i, model in enumerate(available_models):
+        if i % 2 == 0:
+            keyboard_buttons.append([])
+        keyboard_buttons[-1].append(
+            InlineKeyboardButton(text=model, callback_data=f"model_{model}")
+        )
+    
+    keyboard_buttons.extend([
+        [InlineKeyboardButton(text="Квадрат (1:1)", callback_data="setting_size_square")],
+        [InlineKeyboardButton(text="Портрет (1:2)", callback_data="setting_size_portrait"),
+         InlineKeyboardButton(text="Пейзаж (2:1)", callback_data="setting_size_landscape")],
+        [InlineKeyboardButton(text="Сбросить", callback_data="setting_reset")]
     ])
-
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     await message.answer("⚙️ Настройки генерации изображений:", reply_markup=keyboard)
 
 
@@ -1080,13 +1162,23 @@ async def handle_settings_selection(query: CallbackQuery):
 
 # Новый обработчик для выбора модели
 @dp.callback_query(lambda query: query.data.startswith("model_"))
-async def handle_model_selection(query: CallbackQuery):
-    user_id = query.from_user.id
-    settings = get_user_settings(user_id)
-    model_name = query.data.split("_", 1)[1]
-    settings["model"] = model_name
-    await query.message.edit_text(f"✅ Модель изменена на: {model_name}")
-    await query.answer()
+async def handle_model_selection(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    selected_model = callback.data.split("_", 1)[1]
+    
+    # Проверяем, доступна ли модель
+    available_models = await get_available_models()
+    if selected_model not in available_models:
+        await callback.answer("❌ Модель недоступна", show_alert=True)
+        return
+    
+    # Обновляем настройки пользователя
+    user_settings[user_id]["model"] = selected_model
+    save_users()
+    
+    # Подтверждение
+    await callback.message.edit_text(f"✅ Модель изменена на: {selected_model}")
+    await callback.answer()
 
 
 # Функция для получения настроек пользователя
@@ -1113,53 +1205,72 @@ async def handle_image_description(message: Message):
         await message.answer("❌ Пожалуйста, укажите описание изображения.")
         return
 
-    # Добавляем запрос в историю пользователя
+    # Проверяем, требует ли модель токена
+    if settings["model"] == "gptimage" and not config.GPTIMAGE_API_TOKEN:
+        await message.answer(
+            "🔒 Модель 'gptimage' требует токен. Получите его по ссылке:\n"
+            "https://github.com/pollinations/pollinations/issues/new?template=special-bee-request.yml "
+        )
+        return
+
+    # Добавляем запрос в историю с оригинальным промптом
     user_history[user_id].append({
         "type": "image",
         "prompt": prompt,
+        "translated_prompt": translated_prompt,
         "model": settings["model"],
         "width": settings["width"],
         "height": settings["height"],
         "timestamp": datetime.now().isoformat()
     })
-    
-    # Сохраняем изменения сразу
     save_users()
-
-    # Сохраняем запрос на изображение
-    image_requests[user_id] = [prompt]
+    image_requests[user_id].append(prompt)
 
     await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_PHOTO)
     
     try:
-        # Параметры для генерации изображения
+        # Получаем параметры генерации
         width = settings["width"]
         height = settings["height"]
         seed = random.randint(10, 99999999)
         model = settings["model"]
 
-        # Формируем корректный URL с кодированием параметров
-        encoded_prompt = urllib.parse.quote(prompt)
+        # Переводим промпт на английский
+        translated_prompt = await translate_to_english(prompt)
+        logging.info(f"Перевод выполнен: {prompt} -> {translated_prompt}")
+
+        # Формируем URL с переведенным промптом
+        encoded_prompt = urllib.parse.quote(translated_prompt)  # ❌ Было: prompt
         params = {
             "width": width,
             "height": height,
             "seed": seed,
             "model": model,
-            "nologo": "true",
-            "enhance": "true"
+            "nologo": "true"
         }
+        
+        if model == "gptimage":
+            headers = {"Authorization": f"Bearer {config.GPTIMAGE_API_TOKEN}"}
+        else:
+            headers = {}
         image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{urllib.parse.urlencode(params)}"
         
-        # Логируем параметры для отладки
-        logging.info(f"Генерация изображения для {user_id} с параметрами: {image_url}")
+        logging.info(f"Генерация изображения: {image_url}")
 
-        # Загружаем изображение с увеличенным тайм-аутом и повторными попытками
-        image_data = await download_image_with_retry(image_url)
+        # Загружаем изображение
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url, timeout=300) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                else:
+                    logging.error(f"Ошибка загрузки изображения: {response.status} - {await response.text()}")
+                    await message.answer("⚠️ Ошибка: не удалось получить изображение.")
+                    return
         
         # Создаем объект BufferedInputFile из данных изображения
         input_file = BufferedInputFile(image_data, filename='image.jpg')
         
-        # Отправляем изображение в Telegram с кнопками перегенерации и принятия
+        # Отправляем изображение с оригинальным описанием
         sent_message = await message.answer_photo(
             photo=input_file,
             caption=f"🖼 Результат для: '{prompt}'\nМодель: {model}, Размер: {width}x{height}, Seed: {seed}",
@@ -1171,21 +1282,22 @@ async def handle_image_description(message: Message):
             ])
         )
         
-        # Сохраняем параметры запроса в словаре
+        # Сохраняем оба промпта в last_image_requests
         last_image_requests[user_id] = {
             "prompt": prompt,
+            "translated_prompt": translated_prompt,  # Новое поле
             "model": model,
             "width": width,
             "height": height
         }
 
-        # Сбрасываем состояние и историю после обработки
+        # Сбрасываем состояние
         user_states[user_id] = None
-        image_requests[user_id] = []
+        image_requests[user_id] = []  # Очищаем историю запросов на изображение
 
     except Exception as e:
         logging.error(f"Ошибка генерации изображения: {str(e)}")
-        user_states[user_id] = None
+        user_states[user_id] = None  # Сбрасываем состояние при ошибке
         await message.answer(f"⚠️ Произошла ошибка при генерации: {str(e)}")
 
 # Функция загрузки изображения с повторными попытками
@@ -1210,30 +1322,37 @@ async def handle_regenerate(callback: CallbackQuery):
 
     # Извлекаем параметры из last_image_requests
     request_data = last_image_requests[user_id]
-    prompt = request_data["prompt"]
+    original_prompt = request_data["prompt"]
+    translated_prompt = request_data.get("translated_prompt", await translate_to_english(original_prompt))  # Повторный перевод при необходимости
     model = request_data["model"]
     width = request_data["width"]
     height = request_data["height"]
+
+    # Генерируем новое значение seed
     new_seed = random.randint(10, 99999999)
 
-    # Формируем новый URL с обновленными параметрами
-    encoded_prompt = urllib.parse.quote(prompt)
+    # Формируем новый URL с переведенным промптом
+    encoded_prompt = urllib.parse.quote(translated_prompt)  # ❌ Было: original_prompt
     params = {
         "width": width,
         "height": height,
         "seed": new_seed,
         "model": model,
-        "nologo": "true",
-        "enhance": "true"
+        "nologo": "true"
     }
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?{urllib.parse.urlencode(params)}"
     
-    # Логируем параметры
     logging.info(f"Перегенерация изображения: {image_url}")
 
     try:
-        # Загружаем изображение с повторными попытками
-        image_data = await download_image_with_retry(image_url)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url, timeout=300) as response:
+                if response.status == 200:
+                    image_data = await response.read()
+                else:
+                    logging.error(f"Ошибка загрузки изображения: {response.status} - {await response.text()}")
+                    await callback.answer("⚠️ Ошибка: не удалось получить изображение.", show_alert=True)
+                    return
         
         # Создаем объект BufferedInputFile из данных изображения
         input_file = BufferedInputFile(image_data, filename='image.jpg')
@@ -1241,10 +1360,10 @@ async def handle_regenerate(callback: CallbackQuery):
         # Убираем кнопки из предыдущего сообщения
         await callback.message.edit_reply_markup(reply_markup=None)
 
-        # Отправляем новое изображение в Telegram с кнопками
+        # Отправляем новое изображение с оригинальным описанием
         await callback.message.answer_photo(
             photo=input_file,
-            caption=f"🖼 Перегенерированное изображение для: '{prompt}'\nМодель: {model}, Размер: {width}x{height}, Seed: {new_seed}",
+            caption=f"🖼 Перегенерированное изображение для: '{original_prompt}'\nМодель: {model}, Размер: {width}x{height}, Seed: {new_seed}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="🔄", callback_data=f"regenerate:{user_id}"),
@@ -1255,8 +1374,11 @@ async def handle_regenerate(callback: CallbackQuery):
         
         await callback.answer("✅ Изображение обновлено!")
 
+        # Обновляем last_image_requests с новым переведенным промптом
+        last_image_requests[user_id]["translated_prompt"] = await translate_to_english(original_prompt)
+        
     except Exception as e:
-        logging.error(f"Ошибка при перегенерации изображения: {str(e)}")
+        logging.error(f"Ошибка при перегенерации: {str(e)}")
         await callback.answer("⚠️ Ошибка при перегенерации", show_alert=True)
 
 # Обработчик для кнопки "Готово"
@@ -1380,7 +1502,7 @@ async def handle_image_analysis(message: Message):
         
         # Отправляем запрос
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+            async with session.post("https://text.pollinations.ai/openai", json=payload, timeout=300) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     logging.error(f"Ошибка анализа: {response.status} - {error_text}")
@@ -1474,12 +1596,63 @@ async def cmd_generate_audio(message: Message):
         "message_id": reply.message_id
     }
 
+# Основной обработчик команды /tts
+@dp.message(Command("tts"))
+async def cmd_tts(message: Message):
+    user_id = message.from_user.id
+    if not message.reply_to_message or not message.reply_to_message.text:
+        await message.answer("❌ Ответьте на текстовое сообщение командой `/tts`")
+        return
+    
+    # Сохраняем текст в состоянии
+    user_states[user_id] = {
+        "action": "tts",
+        "text": message.reply_to_message.text
+    }
+    
+    # Отправляем клавиатуру выбора голоса
+    await message.answer("🎙️ Выберите голос для озвучивания:", reply_markup=voice_selection_keyboard())
+
 def voice_selection_keyboard():
     """Клавиатура для выбора голоса"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=voice, callback_data=f"voice_{voice}") for voice in config.SUPPORTED_VOICES],
-        [InlineKeyboardButton(text="↩️ Отмена", callback_data="voice_cancel")]
+        [InlineKeyboardButton(text=voice, callback_data=f"tts_voice_{voice}") for voice in config.SUPPORTED_VOICES],
+        [InlineKeyboardButton(text="↩️ По умолчанию", callback_data="tts_voice_default")]
     ])
+
+@dp.callback_query(lambda query: query.data.startswith("tts_voice_"))
+async def handle_tts_voice(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_states.get(user_id)
+    
+    if not state or state["action"] != "tts":
+        await callback.answer("❌ Нет активного запроса TTS")
+        return
+    
+    voice = callback.data.split("_")[2]
+    if voice == "default":
+        voice = config.DEFAULT_VOICE
+    
+    text = state["text"]
+    await callback.message.edit_text(f"🔄 Генерация аудио с голосом: {voice}")
+    
+    try:
+        # Определяем метод (GET или POST)
+        if len(text) > 4096:
+            audio_binary = await generate_audio_post(text, voice)
+        else:
+            audio_binary = await generate_audio_get(text, voice)
+        
+        input_file = BufferedInputFile(audio_binary, filename='tts.mp3')
+        await callback.message.answer_audio(input_file, caption=f"🎙️ Аудио сгенерировано с голосом: {voice}")
+        await callback.message.delete()
+    
+    except Exception as e:
+        logging.error(f"Ошибка генерации TTS: {str(e)}")
+        await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
+    
+    finally:
+        user_states.pop(user_id, None)
 
 @dp.callback_query(lambda query: query.data.startswith("voice_"))
 async def handle_voice_selection(callback: CallbackQuery):
@@ -1528,44 +1701,45 @@ async def generate_audio_get(user_id, text, voice, callback):
         logging.error(f"Ошибка генерации через GET: {str(e)}")
         await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
 
-async def generate_audio_post(user_id, text, voice, callback):
-    try:
-        payload = {
-            "model": config.TTS_MODEL,
-            "messages": [{"role": "user", "content": text}],
-            "voice": voice
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"Ошибка генерации аудио: {response.status} - {error_text}")
-                    await callback.message.answer("⚠️ Не удалось сгенерировать аудио")
-                    return
-                
-                result = await response.json()
-        
-        # Извлекаем base64-аудио
-        try:
-            audio_data_base64 = result['choices'][0]['message']['audio']['data']
-            audio_binary = base64.b64decode(audio_data_base64)
-        except (KeyError, IndexError, base64.binascii.Error) as e:
-            logging.error(f"Ошибка обработки ответа: {str(e)}")
-            await callback.message.answer("❌ Ошибка: не удалось получить аудио из ответа")
-            return
-        
-        # Сохраняем в историю
-        save_audio_history(user_id, text, voice, "POST")
-        
-        # Создаем и отправляем аудиофайл
-        input_file = BufferedInputFile(audio_binary, filename='generated_audio.mp3')
-        await callback.message.answer_audio(input_file, caption=f"🎙️ Аудио сгенерировано с голосом: {voice}")
-        await callback.message.delete()
+# Функция для генерации аудио через GET (короткие тексты)
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+async def generate_audio_get(text, voice):
+    """Генерация аудио через GET-запрос"""
+    encoded_text = urllib.parse.quote(text)
+    url = f"https://text.pollinations.ai/ {encoded_text}"
+    params = {
+        "model": config.TTS_MODEL,
+        "voice": voice
+    }
     
-    except Exception as e:
-        logging.error(f"Ошибка генерации через POST: {str(e)}")
-        await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, timeout=300) as response:
+            if response.status == 200 and 'audio/mpeg' in response.headers.get('Content-Type', ''):
+                return await response.read()
+            error_text = await response.text()
+            raise Exception(f"Ошибка TTS (GET): {response.status} - {error_text}")
+
+# Функция для генерации аудио через POST (длинные тексты)
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10))
+async def generate_audio_post(text, voice):
+    """Генерация аудио через POST-запрос"""
+    payload = {
+        "model": config.TTS_MODEL,
+        "messages": [{"role": "user", "content": text}],
+        "voice": voice
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise Exception(f"Ошибка TTS (POST): {response.status} - {error_text}")
+            
+            result = await response.json()
+            try:
+                return base64.b64decode(result['choices'][0]['message']['audio']['data'])
+            except (KeyError, IndexError, base64.binascii.Error) as e:
+                raise Exception(f"Ошибка обработки ответа: {str(e)}")
 
 def save_audio_history(user_id, text, voice, method):
     """Сохранение генерации аудио в историю"""
@@ -1608,7 +1782,7 @@ async def generate_audio_with_retry(payload, method="POST"):
                 error_text = await response.text()
                 raise Exception(f"Ошибка API: {error_text}")
         else:
-            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+            async with session.post("https://text.pollinations.ai/openai", json=payload, timeout=300) as response:
                 if response.status == 200:
                     return await response.json()
                 error_text = await response.text()
@@ -1959,6 +2133,35 @@ async def handle_existing_jobs(user_id, file_path):
                     await bot.send_message(user_id, f"⚠️ Ошибка при создании файла: {str(e)}", disable_notification=True)
                 break
 
+#####################################################
+########### Обработчик первода сообщений ############
+@dp.message(Command("translatetoeng"))
+async def cmd_translate(message: Message):
+    if not message.reply_to_message or not message.reply_to_message.text:
+        await message.answer("❌ Ответьте на текстовое сообщение командой `/translatetoeng`")
+        return
+    
+    original_text = message.reply_to_message.text
+    translated_text = await translate_to_english(original_text)
+    
+    await message.answer(
+        f"🔄 Перевод сообщения:\n\n"
+        f"{translated_text}"
+    )
+
+@dp.message(Command("translatetoru"))
+async def cmd_translate(message: Message):
+    if not message.reply_to_message or not message.reply_to_message.text:
+        await message.answer("❌ Ответьте на текстовое сообщение командой `/translatetoru`")
+        return
+    
+    original_text = message.reply_to_message.text
+    translated_text = await translate_to_russian(original_text)
+    
+    await message.answer(
+        f"🔄 Перевод сообщения:\n\n"
+        f"{translated_text}"
+    )
 
 #####################################################
 # Фильтр для проверки состояния ожидания аудиофайла #
