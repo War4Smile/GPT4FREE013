@@ -1,6 +1,7 @@
 # config.py
 import os
 from dotenv import load_dotenv
+from alworkproviders import AVAILABLE_PROVIDERS
 
 # Загрузка переменных из .env
 load_dotenv()
@@ -10,6 +11,7 @@ ADMINS = [int(uid) for uid in os.getenv("ADMINS", "").split(",") if uid.strip()]
 
 # Токен бота
 BOT_TOKEN = os.getenv("BOT_TOKEN", "TG_TOKEN")
+DEFAULT_PROVIDER = AVAILABLE_PROVIDERS[0]
 
 # API ключ для DeepSeek
 API_DeepSeek = os.getenv("API_DeepSeek", "")
@@ -58,11 +60,19 @@ AUDIO_FORMAT = "mp3"  # Поддерживаемый формат
 
 # Настройки транскрибации через Pollinations AI
 TRANSCRIBE_MODEL = "openai-audio"
-SUPPORTED_AUDIO_FORMATS = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'webm']
-MAX_AUDIO_SIZE = 200 * 1024 * 1024  # 200 MB
+SUPPORTED_AUDIO_FORMATS = ['mp3', 'wav']
+MAX_AUDIO_SIZE = 200 * 1024 * 1024  # Максимальный размер файла (200 MB)
 
 # Настройки генерации аудио
 TTS_MODEL = "openai-audio"
+DEFAULT_TTS_PROVIDER = "PollinationsAI"
 DEFAULT_VOICE = "alloy"  # Голос по умолчанию
 SUPPORTED_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
 AUDIO_FORMAT = "mp3"  # Формат выходного аудио
+
+# Настройки голосового общения
+SPEECH_TO_TEXT_MODEL = "openai-audio"  # Модель транскрибации
+TEXT_TO_SPEECH_MODEL = "openai-audio"  # Модель генерации аудио
+MAX_AUDIO_DURATION = 300  # Максимальная длительность аудио в секундах
+SUPPORTED_AUDIO_FORMATS = ['mp3', 'ogg', 'wav', 'webm']
+DEFAULT_AUDIO_FORMAT = 'mp3'
