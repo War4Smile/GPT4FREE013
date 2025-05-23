@@ -4,7 +4,7 @@ import logging
 import config
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
-from providers.fully_working_providers import AVAILABLE_PROVIDERS
+from providers.fully_working import AVAILABLE_PROVIDERS
 from middlewares.user_middleware import UserMiddleware
 
 

@@ -6,10 +6,7 @@ from PIL import Image
 from io import BytesIO
 from services.tgapi import bot
 from aiogram import Bot, Dispatcher
-from providers.fully_working_providers import AVAILABLE_PROVIDERS
-from datetime import datetime, timedelta
 from utils import cleanup, commands
-from database import temp_file_store
 from services import (admin, image_gen,audio_transcribeapi, retry,
                       audio_transcribe, imageanalysis, textmessages,
                       generateaudio)

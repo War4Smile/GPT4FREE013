@@ -1,4 +1,4 @@
-# prov.py
+# utils/provider_check.py
 import os
 import g4f
 import asyncio
@@ -24,6 +24,7 @@ class ProviderHealthChecker:
     def __init__(self):
         self.providers = self._get_all_providers()
         self.health_status = {}
+        self.PROVIDERS_DIR = PROVIDERS_DIR  # Указываем папку для сохранения
         
     def _get_all_providers(self) -> List[str]:
         return [
@@ -171,50 +172,47 @@ class ProviderHealthChecker:
         return "Частично рабочий (ограничения)"
         
     async def run_health_check(self) -> Dict[str, Dict]:
-        tasks = []
-        for provider in self.providers:
-            tasks.append(self.check_provider_health(provider))
-        
+        tasks = [self.check_provider_health(provider) for provider in self.providers]
         results = await asyncio.gather(*tasks)
         self.health_status = {result["provider"]: result for result in results}
+        
+        self.save_working_providers("working.py")
+        self.save_providers_by_status()
+        
         return self.health_status
     
-    def save_working_providers(self, filename="alworkproviders.py"):
-        working_providers = []
-        for provider, status in self.health_status.items():
-            provider_status = status["status"]
-            if provider_status in ["Работоспособный", "Частично рабочий (домен недоступен)"]:
-                working_providers.append(f'"{provider}"')
-            elif provider_status == "Частично рабочий (требует авторизацию)":
-                working_providers.append(f'"{provider}", # Требует авторизацию')
+    def save_working_providers(self, filename="working.py"):
+        working = [f'"{provider}"' for provider, status in self.health_status.items()
+                if status["status"] == "Работоспособный"]
         
-        content = "# alworkproviders.py\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(working_providers) + "\n]"
-        
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(content)
-            logging.info(f"Рабочие провайдеры сохранены в {filename}")
-        except Exception as e:
-            logging.error(f"Ошибка сохранения файла: {str(e)}")
+        self._save_to_file(working, filename, "Работоспособные провайдеры")
 
     def save_providers_by_status(self):
-        """Сохраняет рабочие и частично рабочие провайдеры в отдельные файлы"""
+        """Сохраняет провайдеров по категориям в папку providers"""
         fully_working = []
         partially_working = []
         non_working = []
-        
+
         for provider, status in self.health_status.items():
             if status["status"] == "Работоспособный":
                 fully_working.append(f'"{provider}"')
-            elif status["status"] == "Частично рабочий (возвращает не русский)":
-                partially_working.append(f'"{provider}", # Возвращает не русский')
+            elif status["status"] == "Частично рабочий (таймаут)":
+                partially_working.append(f'"{provider}", # Таймаут')
             else:
                 non_working.append(f'"{provider}", # {status["status"]}')
-        
-        # Сохраняем в файлы
-        self._save_providers_list(fully_working, "fully_working_providers.py")
-        self._save_providers_list(partially_working, "partially_working_providers.py")
-        self._save_providers_list(non_working, "non_working_providers.py")
+
+        # Сортировка: Qwen в начало
+        def sort_key(item):
+            # Извлекаем имя провайдера из строки
+            name = item.split('",')[0].strip('"')
+            return not name.startswith("Qwen")  # Qwen -> True, остальные -> False
+
+        fully_working_sorted = sorted(fully_working, key=sort_key)
+
+        # Сохраняем отсортированные списки
+        self._save_to_file(fully_working_sorted, "fully_working.py", "Полностью рабочие (Qwen в приоритете)")
+        self._save_to_file(partially_working, "partially_working.py", "Частично рабочие")
+        self._save_to_file(non_working, "non_working.py", "Нерабочие")
 
     def _save_providers_list(self, providers: list, filename: str):
         content = f"# {filename}\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(providers) + "\n]"
@@ -225,20 +223,22 @@ class ProviderHealthChecker:
         except Exception as e:
             logging.error(f"Ошибка сохранения {filename}: {str(e)}")
 
-    def _save_to_file(self, providers: List[str], filename: str, comment: str):
-        full_path = os.path.join(PROVIDERS_DIR, filename)   
+    def _save_to_file(self, providers: List[str], filename: str, comment: str = ""):
+        full_path = os.path.join(PROVIDERS_DIR, filename)
+        
         if not providers:
             logging.warning(f"Нет провайдеров для сохранения в {filename}")
             return
-        
-        content = f"# alworkproviders.py - {comment}\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(providers) + "\n]\n"
+
+        content = f"# {filename} - {comment}\n"
+        content += "AVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(providers) + "\n]"
         
         try:
             with open(full_path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            logging.info(f"Провайдеры сохранены в {filename}")
+            logging.info(f"Сохранено {len(providers)} провайдеров в {full_path}")
         except Exception as e:
-            logging.error(f"Ошибка сохранения {filename}: {str(e)}")
+            logging.error(f"Ошибка сохранения {full_path}: {str(e)}")
 
     def get_summary_report(self) -> Dict[str, any]:
         """Генерирует сводный отчет о состоянии провайдеров"""

@@ -1,7 +1,7 @@
 # config.py
 import os
 from dotenv import load_dotenv
-from providers.fully_working_providers import AVAILABLE_PROVIDERS
+from providers.fully_working import AVAILABLE_PROVIDERS
 
 # Загрузка переменных из .env
 load_dotenv()
