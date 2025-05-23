@@ -1,15 +1,18 @@
 # main.py
+import os
+import asyncio
+import logging
+from PIL import Image
+from io import BytesIO
 from services.tgapi import bot
 from aiogram import Bot, Dispatcher
 from alworkproviders import AVAILABLE_PROVIDERS
-import os
-import logging
-from utils import commands
-from services import admin
-from services.audio_transcribeapi import handle_audio_file
-from services.audio_transcribe import is_waiting_for_audio_file
-from services import (image_gen,audio_transcribeapi, retry,
-                      audio_transcribe, imageanalysis, textmessages)
+from datetime import datetime, timedelta
+from utils import cleanup, commands
+from database import temp_file_store
+from services import (admin, image_gen,audio_transcribeapi, retry,
+                      audio_transcribe, imageanalysis, textmessages,
+                      generateaudio)
 from middlewares.user_middleware import UserMiddleware
 dp = Dispatcher()
 
@@ -21,6 +24,7 @@ dp.include_router(commands.router)
 dp.include_router(admin.router)
 dp.include_router(audio_transcribe.router)
 dp.include_router(audio_transcribeapi.router)
+dp.include_router(generateaudio.router)
 dp.include_router(imageanalysis.router)
 dp.include_router(image_gen.router)
 dp.include_router(textmessages.router)
@@ -41,13 +45,13 @@ def clear_temp_folder():
                 os.remove(file_path)
         except Exception as e:
             print(f"Ошибка при удалении файла {file_path}: {str(e)}")
-
 # Вызов функции очистки при запуске
 clear_temp_folder()
 
-
 # Запуск бота
 async def main():
+    # Запуск задачи очистки
+    asyncio.create_task(cleanup.cleanup_temp_store())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

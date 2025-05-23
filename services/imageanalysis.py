@@ -1,33 +1,34 @@
 # services/imageanalysis.py
+import hashlib
 import aiohttp
+import asyncio
 import config
 import logging
 import urllib.parse
 import base64
+import uuid
 from io import BytesIO
 from PIL import Image
 from aiogram import F, Router
 from aiogram.enums import ParseMode, ChatAction
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputFile, BufferedInputFile, FSInputFile, BotCommand, BotCommandScopeChat, TelegramObject
 from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime
 from services.retry import generate_audio_with_retry
-from utils.helpers import get_user_settings, save_users
-from database import (
-                        save_users, load_users, save_blocked_users,
+from services.tgapi import bot
+from utils.helpers import get_user_settings, save_users, generate_short_id, remove_html_tags
+from database import (  save_users, load_users, save_blocked_users,
                         user_history, user_settings, user_info,
                         user_states, admin_states, blocked_users,
                         user_analysis_states, user_analysis_settings,
-                        user_transcribe_states )
+                        user_transcribe_states, temp_file_store )
 from utils.helpers import get_user_settings, translate_to_english
-from services.tgapi import bot
 
 router = Router()
 
 ##################################################
-########### Блок анализа изображений ###########
+######### Блок доп настроек изображения ##########
 
 # Функция для получения настроек анализа
 def get_user_analysis_settings(user_id):
@@ -70,11 +71,152 @@ async def handle_analysis_quality(callback: CallbackQuery):
     await callback.message.edit_text(f"✅ Качество анализа установлено: {quality}")
     await callback.answer()
 
-# Обработчик возврата к основному меню
-@router.callback_query(lambda query: query.data == "analysis_settings_back")
-async def handle_analysis_settings_back(callback: CallbackQuery):
-    await callback.message.edit_text("⚙️ Выберите настройку:")
-    # ... (ваше текущее меню настроек)
+#############################################
+######### Блок анализа изображения ##########
+
+# Обработчик для изображений и других медиафайлов
+@router.message(F.photo | (F.document & F.document.mime_type.startswith('image/')))
+async def handle_unsolicited_image(message: Message):
+    try:
+        # Проверяем, не в состоянии ли пользователь ожидания
+        user_id = message.from_user.id
+        if user_states.get(user_id) == "waiting_for_image_description":
+            return  # Игнорируем, если пользователь уже в процессе генерации
+        
+        if user_analysis_states.get(user_id) == "waiting_for_image_analysis":
+            return  # Игнорируем, если пользователь уже в процессе анализа
+        
+        # Получаем file_id
+        if message.photo:
+            file_id = message.photo[-1].file_id
+        elif message.document:
+            file_id = message.document.file_id
+        else:
+            logging.error("Не удалось получить file_id из изображения")
+            return
+        
+        # Генерируем short_id
+        short_id = generate_short_id(file_id)
+        
+        # Кнопки под изображением
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔍 Проанализировать", callback_data=f"analyze_now_{short_id}")],
+            [InlineKeyboardButton(text="🖼 Сгенерировать", callback_data="suggest_generate")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="censel_button")]
+        ])
+        
+        # Отправляем пустое сообщение с клавиатурой
+        await message.answer("Вы отправили изображение. Хотите проанализировать его содержимое?", reply_markup=keyboard)
+        
+    except Exception as e:
+        logging.error(f"Ошибка в обработке изображения: {str(e)}")
+        await message.answer("⚠️ Ошибка при обработке изображения.")
+
+
+# services/imageanalysis.py
+async def analyze_image(message: Message, file_id: str):
+    user_id = message.from_user.id
+    
+    try:
+        # Получаем file_info напрямую
+        file_info = await bot.get_file(file_id)
+        logging.info(f"Получен file_id: {file_id}, размер: {file_info.file_size} байт")
+        
+        # Формируем прямую ссылку
+        file_url = f"https://api.telegram.org/file/bot {bot.token}/{file_info.file_path}"
+        
+        # Формируем payload с URL вместо base64
+        payload = {
+            "model": config.IMAGE_ANALYSIS_MODEL,
+            "messages": [
+                {"role": "system", "content": "Опишите, что изображено на этой картинке на русском языке."},
+                {"role": "user", "content": file_url}  # Передаем прямую ссылку
+            ],
+            "max_tokens": config.ANALYSIS_QUALITY_SETTINGS.get("high", 300)
+        }
+        
+        # Отправляем запрос в API
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://text.pollinations.ai/openai", json=payload, timeout=30) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"Ошибка анализа: {response.status} - {error_text}")
+                    await message.answer("⚠️ Ошибка: не удалось проанализировать изображение")
+                    return
+                
+                result = await response.json()
+                analysis = result['choices'][0]['message']['content']
+                analysis = remove_html_tags(analysis)
+        
+        # Сохраняем результат
+        user_entry = {
+            "type": "analysis",
+            "response": analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+        user_history.setdefault(user_id, []).append(user_entry)
+        save_users()
+        
+        # Отправляем ответ пользователю
+        await message.answer(f"🔍 Результат анализа изображения:\n\n{analysis}")
+        
+    except TelegramBadRequest as e:
+        if "invalid file_id" in str(e):
+            logging.error("Недействительный file_id")
+            await message.answer("❌ Не удалось получить изображение. Повторите попытку.")
+        else:
+            logging.error(f"Ошибка Telegram: {str(e)}")
+            await message.answer("⚠️ Ошибка при анализе изображения.")
+    except aiohttp.ClientError as e:
+        logging.error(f"Ошибка сети при загрузке изображения: {str(e)}")
+        await message.answer("⚠️ Ошибка загрузки изображения.")
+    except Exception as e:
+        logging.error(f"Неизвестная ошибка при анализе: {str(e)}")
+        await message.answer("⚠️ Ошибка при анализе изображения.")
+    finally:
+        # Сбрасываем состояние пользователя
+        user_analysis_states[user_id] = None
+
+async def analyze_and_respond(message: Message, file_id: str):
+    try:
+        # Запускаем анализ изображения
+        await analyze_image(message, file_id)
+    except Exception as e:
+        logging.error(f"Ошибка при анализе изображения: {str(e)}")
+        await message.answer("⚠️ Ошибка при анализе изображения.")
+
+@router.callback_query(lambda query: query.data.startswith("analyze_now_"))
+async def handle_analyze_now(callback: CallbackQuery):
+    try:
+        # Подтверждаем нажатие кнопки и убираем клавиатуру
+        await callback.answer()
+        await callback.message.edit_reply_markup(reply_markup=None)  # Убираем кнопки
+        await callback.message.delete()
+        
+        # Извлекаем short_id
+        short_id = callback.data.split("analyze_now_", 1)[1]
+        
+        # Проверяем, существует ли short_id
+        if short_id not in temp_file_store:
+            await callback.message.answer("❌ Срок действия запроса истек.")
+            return
+        
+        # Получаем оригинальный file_id
+        stored = temp_file_store[short_id]
+        file_id = stored["file_id"]
+        
+        # Проверяем возраст записи
+        if (datetime.now() - stored["timestamp"]).total_seconds() > 86400:  # 24 часа
+            del temp_file_store[short_id]
+            await callback.message.answer("⏳ Ссылка на изображение устарела. Повторите запрос.")
+            return
+        
+        # Запускаем анализ
+        await analyze_image(callback.message, file_id)
+        
+    except Exception as e:
+        logging.error(f"Ошибка при анализе изображения: {str(e)}")
+        await callback.message.answer("⚠️ Ошибка при анализе изображения.")
 
 # Обработчик изображений для анализа
 @router.message(lambda message: message.photo or (message.document and message.document.mime_type.startswith('image/')))
@@ -117,7 +259,7 @@ async def handle_image_analysis(message: Message):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Опишите, что изображено на этой картинке"},
+                        {"type": "text", "text": "Вы — опытный аналитик изображений, опишите содержимое картинки подробно на русском языке."},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -134,7 +276,7 @@ async def handle_image_analysis(message: Message):
         
         # Отправляем запрос
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
+            async with session.post("https://text.pollinations.ai/openai", json=payload, timeout=300) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     logging.error(f"Ошибка анализа: {response.status} - {error_text}")
@@ -143,6 +285,7 @@ async def handle_image_analysis(message: Message):
                 
                 result = await response.json()
                 analysis = result['choices'][0]['message']['content']
+                analysis = remove_html_tags(analysis)  # Очищаем ответ от HTML-тегов
                 
                 # Сохраняем в историю
                 user_entry = {
@@ -172,181 +315,15 @@ async def handle_image_analysis(message: Message):
         # Сбрасываем состояние
         user_analysis_states[user_id] = None
 
-# Обработчик для изображений без команды
-@router.message(lambda message: message.photo or (message.document and message.document.mime_type.startswith('image/')))
-async def handle_unsolicited_image(message: Message):
-    user_id = message.from_user.id
-    
-    # Проверяем, не находится ли пользователь в процессе генерации изображения
-    if user_states.get(user_id) == "waiting_for_image_description":
-        return  # Игнорируем, если пользователь уже в процессе генерации
-    
-    # Проверяем, не запрашиваем ли мы анализ изображения
-    if user_analysis_states.get(user_id) == "waiting_for_image_analysis":
-        return  # Игнорируем, если пользователь уже в процессе анализа
-
-    # Отправляем предложение проанализировать изображение
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Проанализировать", callback_data="suggest_analyze")],
-        [InlineKeyboardButton(text="🖼 Сгенерировать", callback_data="suggest_generate")]
-    ])
-    
-    await message.answer(
-        "Вы отправили изображение. Хотите проанализировать его содержимое или сгенерировать новое?",
-        reply_markup=keyboard
-    )
-
-# Обработчик нажатия на кнопку "Проанализировать"
-@router.callback_query(lambda query: query.data == "suggest_analyze")
-async def handle_suggest_analyze(callback: CallbackQuery):
-    await callback.message.edit_text("Хорошо, я могу проанализировать это изображение. Для этого используйте команду `/analyze`.")
-    await callback.answer()
-
 # Обработчик нажатия на кнопку "Сгенерировать"
 @router.callback_query(lambda query: query.data == "suggest_generate")
 async def handle_suggest_generate(callback: CallbackQuery):
     await callback.message.edit_text("Хорошо, вы можете сгенерировать новое изображение. Для этого используйте команду `/image`.")
     await callback.answer()
 
+# Обработчик нажатия на кнопку "Отмена"
+@router.callback_query(lambda query: query.data == "censel_button")
+async def handle_censel_button(callback: CallbackQuery):
+    await callback.message.edit_text("При необходимости вы можете проанализировать изображение. Для этого используйте команду `/analyse`.")
+    await callback.answer()
 
-###########################################################
-####### Обработчик генерации аудиофайла Polinations #######
-# Блок генерации аудио из текста
-@router.message(Command("generateaudio"))
-async def cmd_generate_audio(message: Message):
-    user_id = message.from_user.id
-    reply = message.reply_to_message
-    
-    if not reply or not reply.text:
-        await message.answer("❌ Ответьте на текстовое сообщение командой `/generateaudio`")
-        return
-    
-    await message.answer("🎙️ Выберите голос для генерации аудио:", reply_markup=voice_selection_keyboard())
-    user_states[user_id] = {
-        "action": "generating_audio",
-        "text": reply.text,
-        "message_id": reply.message_id
-    }
-
-def voice_selection_keyboard():
-    """Клавиатура для выбора голоса"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=voice, callback_data=f"voice_{voice}") for voice in config.SUPPORTED_VOICES],
-        [InlineKeyboardButton(text="↩️ Отмена", callback_data="voice_cancel")]
-    ])
-
-@router.callback_query(lambda query: query.data.startswith("voice_"))
-async def handle_voice_selection(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    state = user_states.get(user_id)
-    
-    if not state or state.get("action") != "generating_audio":
-        await callback.answer("❌ Нет активного запроса генерации аудио")
-        return
-    
-    voice = callback.data.split("_")[1]
-    
-    if voice == "cancel":
-        await callback.message.delete()
-        user_states.pop(user_id, None)
-        return
-    
-    text = state.get("text", "")
-    
-    # Проверяем длину текста
-    if len(text) > 4096:
-        # Используем POST-метод для длинных текстов
-        await generate_audio_post(user_id, text, voice, callback)
-    else:
-        # Используем GET-метод для коротких текстов
-        await generate_audio_get(user_id, text, voice, callback)
-
-async def generate_audio_get(user_id, text, voice, callback):
-    try:
-        encoded_text = urllib.parse.quote(text)
-        payload = {
-            "url": f"https://text.pollinations.ai/ {encoded_text}?model={config.TTS_MODEL}&voice={voice}"
-        }
-        
-        audio_data = await generate_audio_with_retry(payload, method="GET")
-        
-        # Сохраняем в историю
-        save_audio_history(user_id, text, voice, "GET")
-        
-        # Создаем и отправляем аудиофайл
-        input_file = BufferedInputFile(audio_data, filename='generated_audio.mp3')
-        await callback.message.answer_audio(input_file, caption=f"🎙️ Аудио сгенерировано с голосом: {voice}")
-        await callback.message.delete()
-    
-    except Exception as e:
-        logging.error(f"Ошибка генерации через GET: {str(e)}")
-        await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
-
-async def generate_audio_post(user_id, text, voice, callback):
-    try:
-        payload = {
-            "model": config.TTS_MODEL,
-            "messages": [{"role": "user", "content": text}],
-            "voice": voice
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/openai ", json=payload, timeout=300) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"Ошибка генерации аудио: {response.status} - {error_text}")
-                    await callback.message.answer("⚠️ Не удалось сгенерировать аудио")
-                    return
-                
-                result = await response.json()
-        
-        # Извлекаем base64-аудио
-        try:
-            audio_data_base64 = result['choices'][0]['message']['audio']['data']
-            audio_binary = base64.b64decode(audio_data_base64)
-        except (KeyError, IndexError, base64.binascii.Error) as e:
-            logging.error(f"Ошибка обработки ответа: {str(e)}")
-            await callback.message.answer("❌ Ошибка: не удалось получить аудио из ответа")
-            return
-        
-        # Сохраняем в историю
-        save_audio_history(user_id, text, voice, "POST")
-        
-        # Создаем и отправляем аудиофайл
-        input_file = BufferedInputFile(audio_binary, filename='generated_audio.mp3')
-        await callback.message.answer_audio(input_file, caption=f"🎙️ Аудио сгенерировано с голосом: {voice}")
-        await callback.message.delete()
-    
-    except Exception as e:
-        logging.error(f"Ошибка генерации через POST: {str(e)}")
-        await callback.message.answer(f"⚠️ Ошибка: {str(e)}")
-
-def save_audio_history(user_id, text, voice, method):
-    """Сохранение генерации аудио в историю"""
-    entry = {
-        "type": "audio",
-        "prompt": text[:100],  # Обрезаем длинные тексты
-        "voice": voice,
-        "method": method,
-        "timestamp": datetime.now().isoformat()
-    }
-    user_history.setdefault(user_id, []).append(entry)
-    save_users()
-
-def split_text_into_chunks(text, max_length=4096):
-    """Разделение текста на части для генерации аудио"""
-    words = text.split()
-    chunks = []
-    current_chunk = ""
-    
-    for word in words:
-        if len(current_chunk) + len(word) + 1 <= max_length:
-            current_chunk += " " + word
-        else:
-            chunks.append(current_chunk.strip())
-            current_chunk = word
-    
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks

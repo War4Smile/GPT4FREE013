@@ -35,6 +35,8 @@ async def set_commands_for_user(user_id: int):
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
+    user_states[user_id] = None  # Сбрасываем состояние
+    user_analysis_states[user_id] = None  # Сбрасываем состояние
     await set_commands_for_user(user_id)
     await message.answer("Привет! Я бот с функциями AI. Могу общаться и генерировать изображения, если нужна дополнительная информация используйте /help.")
 

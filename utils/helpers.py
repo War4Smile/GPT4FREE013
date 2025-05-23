@@ -1,5 +1,6 @@
 # utils/helpers.py
 import aiohttp
+import hashlib
 import asyncio
 import base64
 import config 
@@ -14,10 +15,11 @@ from bs4 import BeautifulSoup
 from pydub import AudioSegment
 from database import user_history, user_settings
 from langdetect import detect
-from database import (  save_users, load_users, save_blocked_users, user_history,
-                        user_settings, user_info, image_requests, last_image_requests,
-                        user_states, admin_states, blocked_users, user_analysis_states,
-                        user_analysis_settings, user_transcribe_states  )
+from database import (  save_users, load_users, save_blocked_users,
+                        user_history, user_settings, user_info,
+                        user_states, admin_states, blocked_users,
+                        user_analysis_states, user_analysis_settings,
+                        user_transcribe_states, temp_file_store )
 
 
 # Сохранение истории пользователя
@@ -138,6 +140,23 @@ def format_response(response):
         formatted_response.append(f"<b>{remaining_text}</b>")
     
     return "\n".join(formatted_response)
+
+
+def generate_short_id(file_id: str) -> str:
+    """Генерирует короткий ID и сохраняет file_id во временное хранилище"""
+    if not file_id:
+        raise ValueError("file_id пустой")
+    
+    # Генерируем короткий хэш
+    short_id = hashlib.md5(file_id.encode()).hexdigest()[:8]
+    
+    # Сохраняем с временной меткой
+    temp_file_store[short_id] = {
+        "file_id": file_id,
+        "timestamp": datetime.now()
+    }
+    
+    return short_id
 
 
 #####################################################

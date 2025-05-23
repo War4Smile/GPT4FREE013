@@ -101,8 +101,17 @@ async def handle_admin_reply(message: Message):
     # Уведомление пользователю о том, что его сообщение отправлено
     await message.answer("✅ Ваш ответ отправлен администратору.")
 
+
+def format_thinking_process(text, duration):
+    """Форматирует мыслительный процесс как цитату"""
+    return f"🔍 Мысли бота:\n{text}\n⏱️ Время выполнения: {duration:.1f} секунд"
+
+# Создаем кастомный фильтр для проверки, является ли автор ответа администратором
+def is_reply_to_admin(message: Message) -> bool:
+    return message.reply_to_message and is_admin(message.reply_to_message.from_user.id)
+
 # Обработчик текстовых сообщений для общения с ИИ
-@router.message(lambda message: message.text is not None and not (message.reply_to_message and is_admin(message.reply_to_message.from_user.id)))
+@router.message(F.text & ~F.func(is_reply_to_admin))
 async def handle_message(message: Message):
     global current_provider
     # Проверяем, существует ли from_user
@@ -192,22 +201,3 @@ async def handle_unsolicited_audio(message: Message):
 async def handle_suggest_transcribe(callback: CallbackQuery):
     await callback.message.edit_text("Хорошо, я могу распознать речь в этом аудиофайле. Для этого используйте команду `/transcribe`.")
     await callback.answer()
-
-# Обработчик для изображений и других медиафайлов
-@router.message(lambda message: message.content_type in ['photo', 'document'])
-async def handle_media(message: Message):
-    if message.photo:
-        # Если это фото и не в состоянии анализа
-        if user_analysis_states.get(message.from_user.id) == "waiting_for_image_analysis":
-            return  # Пропускаем - будет обработано в handle_image_analysis
-        
-        await message.answer("🖼 Для генерации изображений используйте команду /image")
-    elif message.document:
-        # Если это документ
-        if message.document.mime_type.startswith('image/'):
-            if user_analysis_states.get(message.from_user.id) == "waiting_for_image_analysis":
-                return  # Пропускаем - будет обработано в handle_image_analysis
-            else:
-                await message.answer("🖼 Для анализа изображений используйте команду /analyze")
-        else:
-            await message.answer("❌ Я пока не умею работать с этим типом файлов")
