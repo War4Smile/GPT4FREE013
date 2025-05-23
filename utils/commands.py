@@ -13,7 +13,7 @@ from database import (  save_users, load_users, save_blocked_users,
                         user_analysis_states, user_analysis_settings,
                         user_transcribe_states)
 from services.admin import is_admin
-from utils.commandlist import user_commands, admin_commands
+from utils.commandlist import user_commands, admin_commands, ADMIN_HELP_TXT, USER_HELP_TXT
 from utils.helpers import translate_to_english, translate_to_russian
 from services.tgapi import bot
 
@@ -60,32 +60,9 @@ async def cmd_help(message: Message):
     user_id = message.from_user.id
     await set_commands_for_user(user_id)  # Обновляем команды при запросе помощи
     if is_admin(user_id):
-        help_text = """
-
-📝 Команды администратора:
-/adminusers - 👥 Администрирование пользователей
-/image - 🖼 Генерация изображения
-/clear - 🧹 Очистка истории
-/help - 📝 Список команд
-/provider - 🔄 Изменить модель GPT
-/imagesettings - ⚙️ Настройки изображения
-
-"""
-
+        help_text = ADMIN_HELP_TXT
     else:
-
-        help_text = """
-
-📝 Доступные команды:
-/start - 🔑 Перезапуск бота
-/image - 🖼 Генерация изображения
-/clear - 🧹 Очистка истории
-/help - 📝 Список команд
-/provider - 🔄 Изменить модель GPT
-/imagesettings - ⚙️ Настройки изображения
-
-"""
-
+        help_text = USER_HELP_TXT
     await message.answer(help_text)
 
 @router.message(Command("translate"))

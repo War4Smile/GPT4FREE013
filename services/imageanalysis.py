@@ -1,4 +1,6 @@
 # services/imageanalysis.py
+import os
+import tempfile
 import hashlib
 import aiohttp
 import asyncio
@@ -26,6 +28,7 @@ from database import (  save_users, load_users, save_blocked_users,
 from utils.helpers import get_user_settings, translate_to_english
 
 router = Router()
+TEMP_DIR = "temp"
 
 ##################################################
 ######### Блок доп настроек изображения ##########
@@ -78,13 +81,14 @@ async def handle_analysis_quality(callback: CallbackQuery):
 @router.message(F.photo | (F.document & F.document.mime_type.startswith('image/')))
 async def handle_unsolicited_image(message: Message):
     try:
-        # Проверяем, не в состоянии ли пользователь ожидания
+        if message.from_user is None:
+            return
+        
         user_id = message.from_user.id
         if user_states.get(user_id) == "waiting_for_image_description":
-            return  # Игнорируем, если пользователь уже в процессе генерации
-        
+            return
         if user_analysis_states.get(user_id) == "waiting_for_image_analysis":
-            return  # Игнорируем, если пользователь уже в процессе анализа
+            return
         
         # Получаем file_id
         if message.photo:
@@ -92,7 +96,6 @@ async def handle_unsolicited_image(message: Message):
         elif message.document:
             file_id = message.document.file_id
         else:
-            logging.error("Не удалось получить file_id из изображения")
             return
         
         # Генерируем short_id
@@ -105,39 +108,54 @@ async def handle_unsolicited_image(message: Message):
             [InlineKeyboardButton(text="❌ Отмена", callback_data="censel_button")]
         ])
         
-        # Отправляем пустое сообщение с клавиатурой
+        # Отправляем сообщение с кнопками
         await message.answer("Вы отправили изображение. Хотите проанализировать его содержимое?", reply_markup=keyboard)
         
     except Exception as e:
         logging.error(f"Ошибка в обработке изображения: {str(e)}")
         await message.answer("⚠️ Ошибка при обработке изображения.")
 
-
-# services/imageanalysis.py
 async def analyze_image(message: Message, file_id: str):
     user_id = message.from_user.id
+    temp_path = None
     
     try:
-        # Получаем file_info напрямую
+        # Получаем file_info
         file_info = await bot.get_file(file_id)
         logging.info(f"Получен file_id: {file_id}, размер: {file_info.file_size} байт")
         
-        # Формируем прямую ссылку
-        file_url = f"https://api.telegram.org/file/bot {bot.token}/{file_info.file_path}"
+        if file_info.file_size == 0:
+            raise ValueError("Получен пустой файл")
+
+        # Создаем уникальное временное имя
+        _, temp_path = tempfile.mkstemp(dir=TEMP_DIR, suffix=f"_{file_id}.jpg")
         
-        # Формируем payload с URL вместо base64
+        # Скачиваем файл локально
+        await bot.download_file(file_info.file_path, temp_path)
+        
+        # Проверяем, что файл сохранился
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+            raise ValueError("Не удалось сохранить изображение локально")
+        
+        # Кодируем в base64
+        with open(temp_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        # Определяем формат изображения
+        image_format = "jpeg"  # Можно улучшить через PIL
         payload = {
             "model": config.IMAGE_ANALYSIS_MODEL,
             "messages": [
-                {"role": "system", "content": "Опишите, что изображено на этой картинке на русском языке."},
-                {"role": "user", "content": file_url}  # Передаем прямую ссылку
-            ],
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Опишите, что изображено на этой картинке на русском языке."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_string}"}}
+                ]}],
             "max_tokens": config.ANALYSIS_QUALITY_SETTINGS.get("high", 300)
         }
-        
-        # Отправляем запрос в API
+        await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        # Отправляем запрос
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://text.pollinations.ai/openai", json=payload, timeout=30) as response:
+            async with session.post("https://text.pollinations.ai/openai ", json=payload) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     logging.error(f"Ошибка анализа: {response.status} - {error_text}")
@@ -156,25 +174,17 @@ async def analyze_image(message: Message, file_id: str):
         }
         user_history.setdefault(user_id, []).append(user_entry)
         save_users()
-        
-        # Отправляем ответ пользователю
+        await bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        # Отправляем результат
         await message.answer(f"🔍 Результат анализа изображения:\n\n{analysis}")
         
-    except TelegramBadRequest as e:
-        if "invalid file_id" in str(e):
-            logging.error("Недействительный file_id")
-            await message.answer("❌ Не удалось получить изображение. Повторите попытку.")
-        else:
-            logging.error(f"Ошибка Telegram: {str(e)}")
-            await message.answer("⚠️ Ошибка при анализе изображения.")
-    except aiohttp.ClientError as e:
-        logging.error(f"Ошибка сети при загрузке изображения: {str(e)}")
-        await message.answer("⚠️ Ошибка загрузки изображения.")
     except Exception as e:
-        logging.error(f"Неизвестная ошибка при анализе: {str(e)}")
-        await message.answer("⚠️ Ошибка при анализе изображения.")
+        logging.error(f"Ошибка при анализе изображения: {str(e)}")
+        await message.answer(f"⚠️ Ошибка при анализе: {str(e)}")
     finally:
-        # Сбрасываем состояние пользователя
+        # Удаляем временный файл
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
         user_analysis_states[user_id] = None
 
 async def analyze_and_respond(message: Message, file_id: str):
@@ -188,28 +198,17 @@ async def analyze_and_respond(message: Message, file_id: str):
 @router.callback_query(lambda query: query.data.startswith("analyze_now_"))
 async def handle_analyze_now(callback: CallbackQuery):
     try:
-        # Подтверждаем нажатие кнопки и убираем клавиатуру
         await callback.answer()
-        await callback.message.edit_reply_markup(reply_markup=None)  # Убираем кнопки
-        await callback.message.delete()
+        await callback.message.delete()  # Удаляем исходное сообщение с кнопками
         
         # Извлекаем short_id
         short_id = callback.data.split("analyze_now_", 1)[1]
-        
-        # Проверяем, существует ли short_id
         if short_id not in temp_file_store:
             await callback.message.answer("❌ Срок действия запроса истек.")
             return
         
-        # Получаем оригинальный file_id
-        stored = temp_file_store[short_id]
-        file_id = stored["file_id"]
-        
-        # Проверяем возраст записи
-        if (datetime.now() - stored["timestamp"]).total_seconds() > 86400:  # 24 часа
-            del temp_file_store[short_id]
-            await callback.message.answer("⏳ Ссылка на изображение устарела. Повторите запрос.")
-            return
+        file_id = temp_file_store[short_id]["file_id"]
+        del temp_file_store[short_id]  # Очищаем временные данные
         
         # Запускаем анализ
         await analyze_image(callback.message, file_id)
