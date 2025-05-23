@@ -1,9 +1,24 @@
 # prov.py
+import os
 import g4f
 import asyncio
 import aiohttp
 import logging
 from typing import Dict, List, Optional
+
+PROVIDERS_DIR = "providers"
+if not os.path.exists(PROVIDERS_DIR):
+    os.makedirs(PROVIDERS_DIR)
+
+def auto_detect_language(text):
+    if not text or not isinstance(text, str):
+        return "unknown"
+    # Простая проверка на русский
+    cyrillic_ratio = sum(1 for char in text if char.isalpha() and char.isascii()) / len(text)
+    if cyrillic_ratio > 0.5:
+        return "ru"
+    # Можно использовать langdetect или fasttext
+    return "en"  # По умолчанию
 
 class ProviderHealthChecker:
     def __init__(self):
@@ -34,20 +49,22 @@ class ProviderHealthChecker:
             }
     
     async def check_provider_availability(self, provider_name: str) -> Dict:
-        """Проверяет доступность провайдера"""
         try:
             provider_class = getattr(g4f.Provider, provider_name)
+            domain = getattr(provider_class, "domain", None)
             
-            # Проверяем базовую доступность домена
-            domain = getattr(provider_class, 'url', None)
-            if domain:
+            if not domain:
+                return {"domain_reachable": None, "init_success": True}
+            
+            # Проверяем доступность домена с таймаутом
+            try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(domain, timeout=10) as response:
+                    async with session.get(domain, timeout=5) as response:
                         domain_reachable = response.status == 200
-            else:
-                domain_reachable = None
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                domain_reachable = False
             
-            # Проверяем возможность инициализации провайдера
+            # Проверяем инициализацию провайдера
             try:
                 provider_instance = provider_class()
                 init_success = True
@@ -68,91 +85,96 @@ class ProviderHealthChecker:
             }
     
     async def test_model_response(self, provider_name: str) -> Dict:
-        """Тестовый запрос к модели для проверки работоспособности"""
         try:
             provider_class = getattr(g4f.Provider, provider_name)
-            
-            # Проверяем, есть ли модели у провайдера
             models = getattr(provider_class, 'models', [])
+            
             if not models:
                 return {"models_available": False, "error": "Нет доступных моделей"}
             
             # Берем первую модель для теста
             test_model = models[0] if isinstance(models, list) else next(iter(models))
-            
-            # Формируем тестовый запрос
             test_messages = [{"role": "user", "content": "Привет"}]
             
-            # Пытаемся получить ответ
-            async with aiohttp.ClientSession() as session:
-                response = await g4f.ChatCompletion.create_async(
-                    model=test_model,
-                    messages=test_messages,
-                    provider=provider_class(),
-                    api_key=None  # Не используем ключ для теста
+            # Тестируем модель с таймаутом
+            try:
+                response = await asyncio.wait_for(
+                    g4f.ChatCompletion.create_async(
+                        model=test_model,
+                        messages=test_messages,
+                        provider=provider_class(),
+                        api_key=None
+                    ),
+                    timeout=10  # Ждем не более 10 секунд
                 )
+            except (asyncio.TimeoutError, Exception) as e:
+                return {
+                    "test_success": False,
+                    "error": str(e)
+                }
             
-            # Проверка на наличие HTML-комментариев (<!--)
+            # Проверяем, не содержит ли ответ HTML-комментарии
             if "<!--" in response:
                 return {
-                    "models_available": True,
-                    "test_model": test_model,
                     "test_success": False,
-                    "error": "Ответ содержит HTML-комментарии (<!--)"
+                    "error": "Ответ содержит HTML-комментарии"
                 }
-                
+            
             return {
-                "models_available": True,
-                "test_model": test_model,
                 "test_success": True,
-                "response_sample": response[:50] + "..." if isinstance(response, str) and len(response) > 50 else response
+                "response_sample": response[:50] + "...",
+                "model": test_model
             }
             
         except Exception as e:
             return {
-                "models_available": False,
+                "test_success": False,
                 "error": str(e)
             }
     
     async def check_provider_health(self, provider_name: str) -> Dict:
-        """Полная проверка состояния провайдера"""
-        auth_check = await self.check_provider_auth(provider_name)
-        availability_check = await self.check_provider_availability(provider_name)
-        model_check = await self.test_model_response(provider_name)
-        
-        return {
-            "provider": provider_name,
-            "auth": auth_check,
-            "availability": availability_check,
-            "model_test": model_check,
-            "status": self._determine_status(auth_check, availability_check, model_check)
-        }
+        try:
+            auth_check = await self.check_provider_auth(provider_name)
+            availability_check = await self.check_provider_availability(provider_name)
+            model_check = await self.test_model_response(provider_name)
+            
+            return {
+                "provider": provider_name,
+                "auth": auth_check,
+                "availability": availability_check,
+                "model_test": model_check,
+                "status": self._determine_status(auth_check, availability_check, model_check)
+            }
+            
+        except Exception as e:
+            return {
+                "provider": provider_name,
+                "auth": {"auth_required": False},
+                "availability": {"domain_reachable": False, "init_success": False},
+                "model_test": {"test_success": False, "error": str(e)},
+                "status": "Частично рабочий (таймаут)"
+            }
     
     def _determine_status(self, auth_check, availability_check, model_check) -> str:
-        """Определяет общий статус провайдера"""
         if not availability_check.get("init_success", False):
             return "Неинициализируемый"
         
-        if availability_check.get("domain_reachable") is False:
-            return "Домен недоступен"
-            
-        if auth_check.get("auth_required") and not auth_check.get("auth_fields"):
-            return "Частично рабочий (требует авторизацию)"
-            
-        # Проверка на HTML-комментарии в ответе
-        if model_check.get("error") and "HTML-комментарии" in model_check["error"]:
-            return "Недоступный (HTML-комментарии)"
-            
         if model_check.get("test_success"):
             return "Работоспособный"
-            
-        if model_check.get("models_available") is False:
-            return "Нет доступных моделей"
-            
+        
+        if auth_check.get("auth_required") and not auth_check.get("auth_fields"):
+            return "Частично рабочий (требует авторизацию)"
+        
+        if not availability_check.get("domain_reachable"):
+            return "Частично рабочий (домен недоступен)"
+        
         return "Частично рабочий (ограничения)"
-    
+        
     async def run_health_check(self) -> Dict[str, Dict]:
-        tasks = [self.check_provider_health(provider) for provider in self.providers]
+        tasks = []
+        for provider in self.providers:
+            tasks.append(self.check_provider_health(provider))
+        
         results = await asyncio.gather(*tasks)
         self.health_status = {result["provider"]: result for result in results}
         return self.health_status
@@ -160,15 +182,13 @@ class ProviderHealthChecker:
     def save_working_providers(self, filename="alworkproviders.py"):
         working_providers = []
         for provider, status in self.health_status.items():
-            # Учитываем и полностью рабочих, и частично рабочих
-            if status["status"] in ["Работоспособный", "Частично рабочий"]:
-                auth_required = status["auth"]["auth_required"]
-                if auth_required:
-                    working_providers.append(f'"{provider}",  # Требует авторизацию')
-                else:
-                    working_providers.append(f'"{provider}"')
+            provider_status = status["status"]
+            if provider_status in ["Работоспособный", "Частично рабочий (домен недоступен)"]:
+                working_providers.append(f'"{provider}"')
+            elif provider_status == "Частично рабочий (требует авторизацию)":
+                working_providers.append(f'"{provider}", # Требует авторизацию')
         
-        content = "# availableproviders.py\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(working_providers) + "\n]\n"
+        content = "# alworkproviders.py\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(working_providers) + "\n]"
         
         try:
             with open(filename, 'w', encoding='utf-8') as f:
@@ -181,25 +201,32 @@ class ProviderHealthChecker:
         """Сохраняет рабочие и частично рабочие провайдеры в отдельные файлы"""
         fully_working = []
         partially_working = []
+        non_working = []
         
         for provider, status in self.health_status.items():
-            # Полностью рабочие
             if status["status"] == "Работоспособный":
                 fully_working.append(f'"{provider}"')
-            # Частично рабочие
-            elif status["status"] in ["Частично рабочий (требует авторизацию)", "Частично рабочий (ограничения)"]:
-                reason = "Требует авторизацию" if status["auth"]["auth_required"] else "Ограничения"
-                partially_working.append(f'"{provider}",  # {reason}')
-            # Исключаем провайдеров с HTML-комментариями
-            elif status["status"] == "Недоступный (HTML-комментарии)":
-                logging.warning(f"{provider} исключен из-за HTML-комментариев в ответе")
+            elif status["status"] == "Частично рабочий (возвращает не русский)":
+                partially_working.append(f'"{provider}", # Возвращает не русский')
+            else:
+                non_working.append(f'"{provider}", # {status["status"]}')
         
-        # Сохранение полностью рабочих
-        self._save_to_file(fully_working, "alworkproviders.py", comment="РАБОЧИЕ")
-        # Сохранение частично рабочих
-        self._save_to_file(partially_working, "alworkproviders_partial.py", comment="ЧАСТИЧНО РАБОЧИЕ")
+        # Сохраняем в файлы
+        self._save_providers_list(fully_working, "fully_working_providers.py")
+        self._save_providers_list(partially_working, "partially_working_providers.py")
+        self._save_providers_list(non_working, "non_working_providers.py")
+
+    def _save_providers_list(self, providers: list, filename: str):
+        content = f"# {filename}\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(providers) + "\n]"
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logging.info(f"Сохранено {len(providers)} провайдеров в {filename}")
+        except Exception as e:
+            logging.error(f"Ошибка сохранения {filename}: {str(e)}")
 
     def _save_to_file(self, providers: List[str], filename: str, comment: str):
+        full_path = os.path.join(PROVIDERS_DIR, filename)   
         if not providers:
             logging.warning(f"Нет провайдеров для сохранения в {filename}")
             return
@@ -207,7 +234,7 @@ class ProviderHealthChecker:
         content = f"# alworkproviders.py - {comment}\nAVAILABLE_PROVIDERS = [\n    " + ",\n    ".join(providers) + "\n]\n"
         
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(full_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             logging.info(f"Провайдеры сохранены в {filename}")
         except Exception as e:

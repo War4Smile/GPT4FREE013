@@ -9,7 +9,7 @@ from aiogram.enums import ParseMode, ChatAction
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputFile, BufferedInputFile, FSInputFile, BotCommand, BotCommandScopeChat, TelegramObject
-from alworkproviders import AVAILABLE_PROVIDERS
+from providers.fully_working_providers import AVAILABLE_PROVIDERS
 from services.tgapi import bot
 from services.admin import (is_admin)
 from database import (  save_users, load_users, save_blocked_users,

@@ -6,7 +6,7 @@ from PIL import Image
 from io import BytesIO
 from services.tgapi import bot
 from aiogram import Bot, Dispatcher
-from alworkproviders import AVAILABLE_PROVIDERS
+from providers.fully_working_providers import AVAILABLE_PROVIDERS
 from datetime import datetime, timedelta
 from utils import cleanup, commands
 from database import temp_file_store

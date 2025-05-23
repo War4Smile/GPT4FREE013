@@ -5,7 +5,7 @@ from aiogram import F, Router, types
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputFile, BufferedInputFile, FSInputFile, BotCommand, BotCommandScopeChat, TelegramObject
-from alworkproviders import AVAILABLE_PROVIDERS
+from providers.fully_working_providers import AVAILABLE_PROVIDERS
 from database import (  save_users, load_users, save_blocked_users,
                         user_history, user_settings, user_info,
                         image_requests, last_image_requests,

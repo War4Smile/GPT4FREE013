@@ -1,16 +1,20 @@
-# alworkproviders.py - РАБОЧИЕ
+# fully_working_providers.py
 AVAILABLE_PROVIDERS = [
+    "Qwen_Qwen_2_5",
+    "Blackbox",
     "ChatGLM",
     "CohereForAI_C4AI_Command",
-    "Dynaspark",
+    "DocsBot",
     "Free2GPT",
     "FreeGpt",
     "GizAI",
-    "LambdaChat",
-    "Qwen_Qwen_2_5",
+    "OIVSCodeSer0501",
+    "OIVSCodeSer2",
+    "OIVSCodeSer5",
     "Qwen_Qwen_2_5M",
     "Qwen_Qwen_2_5_Max",
     "Qwen_Qwen_2_72B",
-    "Websim",
+    "Qwen_Qwen_3",
+    "WeWordle",
     "Yqcloud"
 ]
