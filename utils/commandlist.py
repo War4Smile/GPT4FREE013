@@ -6,6 +6,9 @@ user_commands = [
     BotCommand(command="start", description="🔑 Запуск бота"),
     BotCommand(command="image", description="🖼 Генерация изображения"),
     BotCommand(command="clear", description="🧹 Очистка истории"),
+    BotCommand(command="quiz", description="🎮 Начать викторину"),
+    BotCommand(command="next", description="➡️ Следующий вопрос"),
+    BotCommand(command="stopquiz", description="🛑 Остановить викторину"),
     BotCommand(command="provider", description="🔄 Изменить модель GPT"),
     BotCommand(command="translatetoru", description="🔍 Перевести текст на Русский")
 ]

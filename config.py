@@ -27,7 +27,8 @@ IMAGE_PARAMS = {
 }
 # Провайдер для генерации изображений
 IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "PollinationsAI")
-DEFAULT_TRANSLATION_PROVIDER = "FreeGpt"
+DEFAULT_TRANSLATION_PROVIDER = "Qwen_Qwen_2_5"
+DEFAULT_QVIZ_PROVIDER = "Qwen_Qwen_2_5"
 DEFAULT_TRANSLATION_MODEL = "gpt-3.5-turbo"
 # Модель для генерации изображений
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "flux")

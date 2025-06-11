@@ -42,6 +42,9 @@ image_analysis_requests = {}
 # Словарь для хранения состояний транскрибации
 user_transcribe_states = {}
 
+# Хранилище уже заданных вопросов для каждого пользователя
+used_questions = {}  
+
 # Файл для хранения данных пользователей
 USER_DATA_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), 'user_data.json'))
 # Файл для хранения заблокированных пользователей
@@ -50,6 +53,10 @@ BLOCKED_USERS_FILE = 'blocked_users.json'
 # Префикс для перегенерации изображений
 REGENERATE_CALLBACK_PREFIX = "regenerate:"
 regenerate_cb = REGENERATE_CALLBACK_PREFIX 
+
+user_quiz_data = {}  # Хранилище для викторины
+group_quiz_data = {}  # Хранилище для групповой викторины
+
 
 ###################################################
 ############# Функция загрузки данных #############
@@ -69,30 +76,25 @@ def migrate_old_history():
 
 # Функция загрузки пользователей
 def load_users():
-    global user_info, user_history, user_settings, image_requests
+    global user_info, user_history, user_settings, image_requests, group_quiz_data  # Добавьте group_quiz_data
     try:
         if not os.path.exists(USER_DATA_FILE):
             logging.warning("Файл данных не найден, создаем новый")
-            save_users()  # Создаем файл с базовой структурой
+            save_users()
             return
-            
         with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            
-        # Проверка структуры данных
         required_keys = ['user_info', 'user_history', 'user_settings', 'image_requests']
         for key in required_keys:
             if key not in data:
                 raise KeyError(f"Отсутствует ключ {key} в файле данных")
-            
-            # Конвертируем строковые ключи в целые числа
-            user_info = {int(k): v for k, v in data.get('user_info', {}).items()}
-            user_history = {int(k): v for k, v in data.get('user_history', {}).items()}
-            user_settings = {int(k): v for k, v in data.get('user_settings', {}).items()}
-            image_requests = {int(k): v for k, v in data.get('image_requests', {}).items()}
-            
-            logging.info("Данные пользователей загружены.")
-            migrate_old_history()
+        user_info = {int(k): v for k, v in data.get('user_info', {}).items()}
+        user_history = {int(k): v for k, v in data.get('user_history', {}).items()}
+        user_settings = {int(k): v for k, v in data.get('user_settings', {}).items()}
+        image_requests = {int(k): v for k, v in data.get('image_requests', {}).items()}
+        group_quiz_data = data.get('group_quiz_data', {})  # Восстановите данные групповой викторины
+        logging.info("Данные пользователей загружены.")
+        migrate_old_history()
 
     except json.JSONDecodeError as e:
         logging.error(f"Ошибка формата JSON: {str(e)}")
@@ -118,18 +120,16 @@ def load_users():
 # Функция сохранения пользователей
 def save_users():
     try:
-        # Создаем директорию, если её нет
         os.makedirs(os.path.dirname(USER_DATA_FILE), exist_ok=True)
-        
         data = {
             'user_info': {str(k): v for k, v in user_info.items()},
             'user_history': {str(k): v for k, v in user_history.items()},
             'user_settings': {str(k): v for k, v in user_settings.items()},
-            'image_requests': {str(k): v for k, v in image_requests.items()}
+            'image_requests': {str(k): v for k, v in image_requests.items()},
+            'group_quiz_data': group_quiz_data  # Добавьте это поле
         }
-
         with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
-             json.dump(data, f, ensure_ascii=False, indent=4)
+            json.dump(data, f, ensure_ascii=False, indent=4)
         logging.info("Данные пользователей сохранены.")
     except Exception as e:
         logging.error(f"Ошибка сохранения данных: {str(e)}")

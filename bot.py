@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher
 from utils import cleanup, commands
 from services import (admin, image_gen,audio_transcribeapi, retry,
                       audio_transcribe, imageanalysis, textmessages,
-                      generateaudio)
+                      generateaudio, quiz)
 from middlewares.user_middleware import UserMiddleware
 dp = Dispatcher()
 
@@ -24,6 +24,7 @@ dp.include_router(audio_transcribeapi.router)
 dp.include_router(generateaudio.router)
 dp.include_router(imageanalysis.router)
 dp.include_router(image_gen.router)
+dp.include_router(quiz.router)
 dp.include_router(textmessages.router)
 
 # Настройка логирования

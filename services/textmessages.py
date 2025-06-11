@@ -17,7 +17,7 @@ from database import (  save_users, load_users, save_blocked_users,
                         image_requests, last_image_requests,
                         user_states, admin_states, blocked_users,
                         user_analysis_states, user_analysis_settings,
-                        user_transcribe_states)
+                        user_transcribe_states, user_quiz_data)
 from utils.helpers import (get_user_settings, convert_to_mp3, split_audio,
                             encode_audio_base64, remove_html_tags,
                             auto_detect_language, format_response)
@@ -120,6 +120,12 @@ async def handle_message(message: Message):
         await message.answer("❌ Не удалось определить пользователя.")
         return
     user_id = message.from_user.id
+    user_state = user_states.get(user_id)
+    
+    # Блокируем текстовый ввод во время викторины
+    if user_state == "in_quiz":
+        await message.answer("⚠️ Ответьте на вопрос с помощью кнопок ниже.")
+        return
     # Получаем провайдера из настроек пользователя
     provider_name = user_settings.get(user_id, {}).get("provider",config.DEFAULT_PROVIDER)
     user_input = message.text
